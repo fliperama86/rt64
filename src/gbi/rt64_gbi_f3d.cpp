@@ -74,12 +74,42 @@ namespace RT64 {
         }
 
         void runDl(State *state, DisplayList **dl) {
+            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
+
+            // Guard: skip sub-DL only if address is clearly outside ANY RDRAM.
+            // The first 512MB of physical address space is committed RDRAM.
+            // Addresses >= 0x20000000 are hardware registers or unmapped.
+            if (rdramAddress >= 0x20000000) {
+                static int skip_count = 0;
+                if (++skip_count <= 5) {
+                    fprintf(stderr, "[RT64-DL] Skipping sub-DL at phys 0x%08X (out of RDRAM)\n", rdramAddress);
+                }
+                return;
+            }
+
+            DisplayList *target = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress));
+
+            // Guard: skip if target doesn't look like valid DL data.
+            // Valid GBI opcodes for F3DEX2 are in specific ranges (0x01-0x0B, 0xB6-0xFF).
+            // MIPS instructions (which start with opcodes like 0x24, 0x27, 0x8C, 0xA4, etc.)
+            // are NOT valid GBI commands. Check the first command's opcode.
+            {
+                uint8_t firstOpcode = (target->w0 >> 24) & 0xFF;
+                // Valid F3DEX2 opcodes: 0x00 (NOP but paired with 0 = empty),
+                // 0x01-0x0B (geometry), 0xB6+ (RDP/settings), 0xD7+ (texture/color)
+                // Invalid if it looks like a MIPS instruction (0x20-0xAF range, except known GBI)
+                bool likelyGBI = (firstOpcode <= 0x0B) || (firstOpcode >= 0xB4);
+                bool isEmpty = (target->w0 == 0 && target->w1 == 0);
+                if (isEmpty || !likelyGBI) {
+                    return;
+                }
+            }
+
             if ((*dl)->p0(16, 1) == 0) {
                 state->pushReturnAddress(*dl);
             }
 
-            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
-            *dl = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress)) - 1;
+            *dl = target - 1;
         }
 
         void endDl(State *state, DisplayList **dl) {

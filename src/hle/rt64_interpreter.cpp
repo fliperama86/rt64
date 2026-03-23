@@ -173,9 +173,14 @@ namespace RT64 {
         constexpr uint32_t maxCmds = 100000;
         while (dl != nullptr) {
             if (++cmdCount > maxCmds) {
-                fprintf(stderr, "[RT64] DL exceeded %u commands — aborting (likely infinite loop). Last cmd: %08X %08X at %p\n",
-                        maxCmds, dl->w0, dl->w1, (void*)dl);
-                break;
+                static int abort_count = 0;
+                abort_count++;
+                if (abort_count <= 5) {
+                    fprintf(stderr, "[RT64] DL exceeded %u commands — aborting (#%d). Last cmd: %08X %08X at %p\n",
+                            maxCmds, abort_count, dl->w0, dl->w1, (void*)dl);
+                }
+                dl = nullptr; // Clean exit — don't break, let the while loop end naturally
+                continue;
             }
             opCode = (dl->w0 >> 24);
 
