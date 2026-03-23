@@ -169,7 +169,14 @@ namespace RT64 {
         DisplayList *dl = dlStart;
         uint8_t opCode;
         GBIFunction func;
+        uint32_t cmdCount = 0;
+        constexpr uint32_t maxCmds = 100000;
         while (dl != nullptr) {
+            if (++cmdCount > maxCmds) {
+                fprintf(stderr, "[RT64] DL exceeded %u commands — aborting (likely infinite loop). Last cmd: %08X %08X at %p\n",
+                        maxCmds, dl->w0, dl->w1, (void*)dl);
+                break;
+            }
             opCode = (dl->w0 >> 24);
 
             if ((extendedOpCode != 0) && (opCode == extendedOpCode)) {
