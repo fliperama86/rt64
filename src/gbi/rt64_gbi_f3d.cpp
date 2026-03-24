@@ -8,6 +8,7 @@
 
 #include "../include/rt64_extended_gbi.h"
 
+
 #include "rt64_f3d.h"
 #include "rt64_gbi_extended.h"
 #include "rt64_gbi_rdp.h"
@@ -103,6 +104,7 @@ namespace RT64 {
                     return;
                 }
             }
+
 
 
             if ((*dl)->p0(16, 1) == 0) {
