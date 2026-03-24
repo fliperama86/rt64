@@ -77,8 +77,6 @@ namespace RT64 {
             const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
 
             // Guard: skip sub-DL only if address is clearly outside ANY RDRAM.
-            // The first 512MB of physical address space is committed RDRAM.
-            // Addresses >= 0x20000000 are hardware registers or unmapped.
             if (rdramAddress >= 0x20000000) {
                 static int skip_count = 0;
                 if (++skip_count <= 5) {
@@ -95,9 +93,6 @@ namespace RT64 {
             // are NOT valid GBI commands. Check the first command's opcode.
             {
                 uint8_t firstOpcode = (target->w0 >> 24) & 0xFF;
-                // Valid F3DEX2 opcodes: 0x00 (NOP but paired with 0 = empty),
-                // 0x01-0x0B (geometry), 0xB6+ (RDP/settings), 0xD7+ (texture/color)
-                // Invalid if it looks like a MIPS instruction (0x20-0xAF range, except known GBI)
                 bool likelyGBI = (firstOpcode <= 0x0B) || (firstOpcode >= 0xB4);
                 bool isEmpty = (target->w0 == 0 && target->w1 == 0);
                 if (isEmpty || !likelyGBI) {

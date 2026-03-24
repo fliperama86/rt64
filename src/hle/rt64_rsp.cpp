@@ -13,6 +13,15 @@
 #include "shared/rt64_rsp_fog.h"
 
 #include "rt64_interpreter.h"
+
+// LoD: TLB-based segment overrides for 0x0E and 0x0F.
+// The NI overlay loader sets these when osMapTLB maps the virtual addresses.
+// RT64's segment table is never updated via G_MOVEWORD for these segments
+// because the game relies on TLB translation which the RSP doesn't have.
+extern "C" {
+    uint32_t g_tlb_segment_0e = 0;
+    uint32_t g_tlb_segment_0f = 0;
+}
 #include "rt64_state.h"
 
 //#define LOG_SPECIAL_MATRIX_OPERATIONS
@@ -112,12 +121,22 @@ namespace RT64 {
             return segAddress;
         }
         else {
-            return segments[((segAddress) >> 24) & 0x0F] + ((segAddress) & 0x00FFFFFF);
+            uint32_t seg = ((segAddress) >> 24) & 0x0F;
+            uint32_t base = segments[seg];
+            // LoD: use TLB segment region for segments 0x0E/0x0F.
+            // The game relies on TLB to map 0x0E/0x0F virtual addresses.
+            // Recompiled NI overlay code writes data to rdram+0x8E/0x8F000000
+            // (via MEM_W), so RT64 must read from the same location.
+            if (base == 0) {
+                if (seg == 0x0F && g_tlb_segment_0f != 0) base = g_tlb_segment_0f;
+                else if (seg == 0x0E && g_tlb_segment_0e != 0) base = g_tlb_segment_0e;
+            }
+            return base + ((segAddress) & 0x00FFFFFF);
         }
     }
 
     // Converts the given segmented address and then applies the RSP DMA physical address mask.
-    // Used in cases where the RSP performs a DMA with a segmented address as the input. 
+    // Used in cases where the RSP performs a DMA with a segmented address as the input.
     uint32_t RSP::fromSegmentedMasked(uint32_t segAddress) {
         return maskPhysicalAddress<0x00FFFFF8>(fromSegmented(segAddress));
     }
