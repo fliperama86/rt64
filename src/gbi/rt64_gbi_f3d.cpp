@@ -76,13 +76,17 @@ namespace RT64 {
         void runDl(State *state, DisplayList **dl) {
             const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
 
-            // Guard: skip sub-DL only if address is clearly outside ANY RDRAM.
+            // Guard: skip sub-DL if address is outside RDRAM.
+            // Allow 0x8E/0x8F region (LoD NI overlay data via MEM_W).
             if (rdramAddress >= 0x20000000) {
-                static int skip_count = 0;
-                if (++skip_count <= 5) {
-                    fprintf(stderr, "[RT64-DL] Skipping sub-DL at phys 0x%08X (out of RDRAM)\n", rdramAddress);
+                uint32_t hi = (rdramAddress >> 24) & 0xFF;
+                if (hi != 0x8E && hi != 0x8F) {
+                    static int skip_count = 0;
+                    if (++skip_count <= 5) {
+                        fprintf(stderr, "[RT64-DL] Skipping sub-DL at phys 0x%08X (out of RDRAM)\n", rdramAddress);
+                    }
+                    return;
                 }
-                return;
             }
 
             DisplayList *target = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress));
@@ -99,6 +103,7 @@ namespace RT64 {
                     return;
                 }
             }
+
 
             if ((*dl)->p0(16, 1) == 0) {
                 state->pushReturnAddress(*dl);

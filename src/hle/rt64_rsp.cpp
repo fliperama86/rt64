@@ -138,7 +138,12 @@ namespace RT64 {
     // Converts the given segmented address and then applies the RSP DMA physical address mask.
     // Used in cases where the RSP performs a DMA with a segmented address as the input.
     uint32_t RSP::fromSegmentedMasked(uint32_t segAddress) {
-        return maskPhysicalAddress<0x00FFFFF8>(fromSegmented(segAddress));
+        uint32_t resolved = fromSegmented(segAddress);
+        // LoD: TLB segment addresses (0x8E/0x8F region) bypass the 8MB DMA mask
+        // — they point to the extended RDRAM region where NI overlay code writes.
+        uint32_t hi = (resolved >> 24) & 0xFF;
+        if (hi == 0x8E || hi == 0x8F) return resolved;
+        return maskPhysicalAddress<0x00FFFFF8>(resolved);
     }
 
     uint32_t RSP::fromSegmentedMaskedPD(uint32_t segAddress) {
@@ -147,6 +152,7 @@ namespace RT64 {
 
     void RSP::setSegment(uint32_t seg, uint32_t address) {
         assert(seg < RSP_MAX_SEGMENTS);
+        // LoD diagnostic: track seg 6 changes near the dress sub-DLs
         segments[seg] = address;
     }
 
