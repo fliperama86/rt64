@@ -152,7 +152,14 @@ namespace RT64 {
 
     void RSP::setSegment(uint32_t seg, uint32_t address) {
         assert(seg < RSP_MAX_SEGMENTS);
-        // LoD diagnostic: track seg 6 changes near the dress sub-DLs
+#ifdef LOD_FIX_SEGMENT_86_BASES
+        // LoD sometimes emits segment bases in the invalid 0x86xxxxxx range.
+        // Treat them as KSEG0/RDRAM pointers so small HUD/effect/item textures
+        // resolve to populated rdram+0x001xxxxx instead of empty rdram+0x061xxxxx.
+        if (((address >> 24) & 0xFF) == 0x86) {
+            address = 0x80000000U | (address & 0x00FFFFFFU);
+        }
+#endif
         segments[seg] = address;
     }
 
