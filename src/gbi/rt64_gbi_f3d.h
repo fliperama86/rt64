@@ -63,6 +63,7 @@ namespace RT64 {
         void matrix(State *state, DisplayList **dl);
         void moveMem(State *state, DisplayList **dl);
         void vertex(State *state, DisplayList **dl);
+        void lodTraceVertexCommand(State *state, DisplayList *dl, const char *decoder, uint32_t address, uint32_t vtxCount, uint32_t dstIndex, bool physicalDataFormat = false);
         void runDl(State *state, DisplayList **dl);
         void endDl(State *state, DisplayList **dl);
         void sprite2DBase(State *state, DisplayList **dl);

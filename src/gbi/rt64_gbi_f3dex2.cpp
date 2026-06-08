@@ -137,6 +137,9 @@ namespace RT64 {
 
         void vertex(State *state, DisplayList **dl) {
             uint8_t vtxCount = (*dl)->p0(12, 8);
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+            GBI_F3D::lodTraceVertexCommand(state, *dl, "F3DEX2", (*dl)->w1, vtxCount, (*dl)->p0(1, 7) - vtxCount);
+#endif
             state->rsp->setVertex((*dl)->w1, vtxCount, (*dl)->p0(1, 7) - vtxCount);
         }
 

@@ -13,6 +13,9 @@
 namespace RT64 {
     namespace GBI_F3DEX {
         void vertex(State *state, DisplayList **dl) {
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+            GBI_F3D::lodTraceVertexCommand(state, *dl, "F3DEX", (*dl)->w1, (*dl)->p0(10, 6), (*dl)->p0(17, 7));
+#endif
             state->rsp->setVertex((*dl)->w1, (*dl)->p0(10, 6), (*dl)->p0(17, 7));
         }
 

@@ -11,6 +11,9 @@
 namespace RT64 {
     namespace GBI_F3DWAVE {
         void vertex(State *state, DisplayList **dl) {
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+            GBI_F3D::lodTraceVertexCommand(state, *dl, "F3DWAVE", (*dl)->w1, (*dl)->p0(9, 7), (*dl)->p0(16, 8) / 5);
+#endif
             state->rsp->setVertex((*dl)->w1, (*dl)->p0(9, 7), (*dl)->p0(16, 8) / 5);
         }
 

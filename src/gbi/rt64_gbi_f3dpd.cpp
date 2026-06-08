@@ -12,6 +12,9 @@
 namespace RT64 {
     namespace GBI_F3DPD {
         void vertex(State *state, DisplayList **dl) {
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+            GBI_F3D::lodTraceVertexCommand(state, *dl, "F3DPD", (*dl)->w1, (*dl)->p0(20, 4) + 1, (*dl)->p0(16, 4), true);
+#endif
             state->rsp->setVertexPD((*dl)->w1, (*dl)->p0(20, 4) + 1, (*dl)->p0(16, 4));
         }
 
