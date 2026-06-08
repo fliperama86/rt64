@@ -45,16 +45,23 @@ extern "C" {
 #define LOD_ENABLE_RENDER_GEOM_TRACE 0
 #endif
 
+#ifndef LOD_ENABLE_RENDER_CLUSTER_TINT
+#define LOD_ENABLE_RENDER_CLUSTER_TINT 0
+#endif
+
 namespace RT64 {
     // RSP
 
     constexpr float DepthRange = 1024.0f;
 
 #if LOD_ENABLE_RENDER_GEOM_TRACE
+    constexpr int LodTraceTriangleOutlierThreshold = 4096;
+
     static uint32_t lodTraceVertexSlotSegmented[RSP_MAX_VERTICES] = {};
     static uint32_t lodTraceVertexSlotPhysical[RSP_MAX_VERTICES] = {};
     static uint32_t lodTraceVertexSlotSourceIndex[RSP_MAX_VERTICES] = {};
     static uint32_t lodTraceVertexSlotSerial[RSP_MAX_VERTICES] = {};
+    static bool lodTraceVertexSlotSuspiciousLoad[RSP_MAX_VERTICES] = {};
     static uint32_t lodTraceVertexLoadSerial = 0;
 
     static bool lodTraceIsOverlayAddress(uint32_t address) {
@@ -66,7 +73,45 @@ namespace RT64 {
         return (std::abs(int(v.x)) > 20000) || (std::abs(int(v.y)) > 20000) || (std::abs(int(v.z)) > 20000);
     }
 
-    static void lodTraceRememberVertexSlots(uint32_t segmentedAddress, uint32_t rdramAddress, uint32_t vtxCount, uint32_t dstIndex) {
+    static bool lodTraceVertexCoordOutlier(const RSP::Vertex &v) {
+        return (std::abs(int(v.x)) > LodTraceTriangleOutlierThreshold) ||
+            (std::abs(int(v.y)) > LodTraceTriangleOutlierThreshold) ||
+            (std::abs(int(v.z)) > LodTraceTriangleOutlierThreshold);
+    }
+
+    static int lodTraceMaxAbsTriangleDelta(const RSP::Vertex &a, const RSP::Vertex &b, const RSP::Vertex &c) {
+        int maxDelta = 0;
+        const RSP::Vertex *verts[3] = { &a, &b, &c };
+        for (uint32_t i = 0; i < 3; i++) {
+            const RSP::Vertex &v0 = *verts[i];
+            const RSP::Vertex &v1 = *verts[(i + 1) % 3];
+            maxDelta = std::max(maxDelta, std::abs(int(v0.x) - int(v1.x)));
+            maxDelta = std::max(maxDelta, std::abs(int(v0.y) - int(v1.y)));
+            maxDelta = std::max(maxDelta, std::abs(int(v0.z) - int(v1.z)));
+        }
+        return maxDelta;
+    }
+
+    static bool lodTraceShouldTintVertexSlot(uint32_t slot) {
+#if LOD_ENABLE_RENDER_CLUSTER_TINT
+        if (slot >= RSP_MAX_VERTICES) {
+            return false;
+        }
+
+        // Current best candidate from the intro forest trace: animated/model vertices loaded from
+        // 0x003784E8..0x00378738. The valid visible triangles only reference the first 10 vertices;
+        // later "extreme" tail entries are display-list/data bytes and should not drive the tint.
+        const uint32_t phys = lodTraceVertexSlotPhysical[slot];
+        return lodTraceVertexSlotSuspiciousLoad[slot] &&
+            (phys >= 0x00378000U) && (phys < 0x00379000U) &&
+            (lodTraceVertexSlotSourceIndex[slot] < 10);
+#else
+        (void)slot;
+        return false;
+#endif
+    }
+
+    static void lodTraceRememberVertexSlots(uint32_t segmentedAddress, uint32_t rdramAddress, uint32_t vtxCount, uint32_t dstIndex, uint32_t vertexSize, bool suspiciousLoad) {
         const uint32_t serial = ++lodTraceVertexLoadSerial;
         for (uint32_t i = 0; i < vtxCount; i++) {
             const uint32_t slot = dstIndex + i;
@@ -75,9 +120,10 @@ namespace RT64 {
             }
 
             lodTraceVertexSlotSegmented[slot] = segmentedAddress;
-            lodTraceVertexSlotPhysical[slot] = rdramAddress + (i * sizeof(RSP::Vertex));
+            lodTraceVertexSlotPhysical[slot] = rdramAddress + (i * vertexSize);
             lodTraceVertexSlotSourceIndex[slot] = i;
             lodTraceVertexSlotSerial[slot] = serial;
+            lodTraceVertexSlotSuspiciousLoad[slot] = suspiciousLoad;
         }
     }
 
@@ -118,7 +164,7 @@ namespace RT64 {
         }
     }
 
-    static void lodTraceVertexLoad(const char *kind, uint32_t segmentedAddress, uint32_t rdramAddress, uint32_t vtxCount, uint32_t dstIndex, const RSP::Vertex *vertices) {
+    static bool lodTraceVertexLoad(const char *kind, uint32_t segmentedAddress, uint32_t rdramAddress, uint32_t vtxCount, uint32_t dstIndex, const RSP::Vertex *vertices) {
         static uint32_t vertexTraceCount = 0;
         int16_t minX = 0, minY = 0, minZ = 0, maxX = 0, maxY = 0, maxZ = 0;
         uint32_t minXIndex = 0, minYIndex = 0, minZIndex = 0, maxXIndex = 0, maxYIndex = 0, maxZIndex = 0;
@@ -179,6 +225,8 @@ namespace RT64 {
             }
             vertexTraceCount++;
         }
+
+        return suspicious;
     }
 
     static void lodTraceLightLoad(uint8_t index, uint32_t segmentedAddress, uint32_t rdramAddress, const RSP::Light &light) {
@@ -643,8 +691,8 @@ namespace RT64 {
         const uint32_t rdramAddress = fromSegmentedMasked(address);
         const Vertex *dlVerts = reinterpret_cast<const Vertex *>(state->fromRDRAM(rdramAddress));
 #if LOD_ENABLE_RENDER_GEOM_TRACE
-        lodTraceVertexLoad("std", address, rdramAddress, vtxCount, dstIndex, dlVerts);
-        lodTraceRememberVertexSlots(address, rdramAddress, vtxCount, dstIndex);
+        const bool suspiciousLoad = lodTraceVertexLoad("std", address, rdramAddress, vtxCount, dstIndex, dlVerts);
+        lodTraceRememberVertexSlots(address, rdramAddress, vtxCount, dstIndex, sizeof(Vertex), suspiciousLoad);
 #endif
         memcpy(&vertices[dstIndex], dlVerts, sizeof(Vertex) * vtxCount);
         setVertexCommon<true, sizeof(Vertex)>(rdramAddress, dstIndex, dstIndex + vtxCount);
@@ -673,8 +721,8 @@ namespace RT64 {
             dst.color.a = col[0];
         }
 #if LOD_ENABLE_RENDER_GEOM_TRACE
-        lodTraceVertexLoad("pd", address, rdramAddress, vtxCount, dstIndex, &vertices[dstIndex]);
-        lodTraceRememberVertexSlots(address, rdramAddress, vtxCount, dstIndex);
+        const bool suspiciousLoad = lodTraceVertexLoad("pd", address, rdramAddress, vtxCount, dstIndex, &vertices[dstIndex]);
+        lodTraceRememberVertexSlots(address, rdramAddress, vtxCount, dstIndex, sizeof(VertexPD), suspiciousLoad);
 #endif
 
         setVertexCommon<true, sizeof(VertexPD)>(rdramAddress, dstIndex, dstIndex + vtxCount);
@@ -702,8 +750,8 @@ namespace RT64 {
             vertices[dstIndex + i] = src.v;
         }
 #if LOD_ENABLE_RENDER_GEOM_TRACE
-        lodTraceVertexLoad("exv1", address, rdramAddress, vtxCount, dstIndex, &vertices[dstIndex]);
-        lodTraceRememberVertexSlots(address, rdramAddress, vtxCount, dstIndex);
+        const bool suspiciousLoad = lodTraceVertexLoad("exv1", address, rdramAddress, vtxCount, dstIndex, &vertices[dstIndex]);
+        lodTraceRememberVertexSlots(address, rdramAddress, vtxCount, dstIndex, sizeof(VertexEXV1), suspiciousLoad);
 #endif
 
         setVertexCommon<false, sizeof(VertexEXV1)>(rdramAddress, dstIndex, dstIndex + vtxCount);
@@ -963,6 +1011,15 @@ namespace RT64 {
             normColBytes.emplace_back(v.color.g);
             normColBytes.emplace_back(v.color.b);
             normColBytes.emplace_back(v.color.a);
+#if LOD_ENABLE_RENDER_GEOM_TRACE && LOD_ENABLE_RENDER_CLUSTER_TINT
+            if (lodTraceShouldTintVertexSlot(i)) {
+                const size_t colorBase = normColBytes.size() - 4;
+                normColBytes[colorBase + 0] = 255;
+                normColBytes[colorBase + 1] = 0;
+                normColBytes[colorBase + 2] = 255;
+                normColBytes[colorBase + 3] = 255;
+            }
+#endif
             viewProjIndices.emplace_back(curViewProjIndex);
             worldIndices.emplace_back(curTransformIndex);
             fogIndices.emplace_back(curFogIndex);
@@ -1426,28 +1483,47 @@ namespace RT64 {
 
 #if LOD_ENABLE_RENDER_GEOM_TRACE
         if (!rawGlobalIndices) {
-            static uint32_t suspiciousTriTraceCount = 0;
+            static uint32_t outlierTriTraceCount = 0;
             const bool localValid = (a < RSP_MAX_VERTICES) && (b < RSP_MAX_VERTICES) && (c < RSP_MAX_VERTICES);
-            const bool suspiciousTri = localValid && (lodTraceVertexCoordSuspicious(vertices[a]) ||
-                lodTraceVertexCoordSuspicious(vertices[b]) || lodTraceVertexCoordSuspicious(vertices[c]));
-            if (suspiciousTri) {
-                if (suspiciousTriTraceCount < 512) {
-                    const RSP::Vertex &va = vertices[a];
-                    const RSP::Vertex &vb = vertices[b];
-                    const RSP::Vertex &vc = vertices[c];
-                    fprintf(stderr,
-                        "[RT64-GEOM][TRI-SUSPICIOUS] #%u local=(%u,%u,%u) global=(%u,%u,%u) xyzA=(%d,%d,%d) xyzB=(%d,%d,%d) xyzC=(%d,%d,%d) srcA=0x%08X/+%u/L%u srcB=0x%08X/+%u/L%u srcC=0x%08X/+%u/L%u geom=0x%08X xform=%u vp=%u\n",
-                        suspiciousTriTraceCount + 1, a, b, c, globalIndices[0], globalIndices[1], globalIndices[2],
-                        va.x, va.y, va.z, vb.x, vb.y, vb.z, vc.x, vc.y, vc.z,
-                        lodTraceVertexSlotPhysical[a], lodTraceVertexSlotSourceIndex[a], lodTraceVertexSlotSerial[a],
-                        lodTraceVertexSlotPhysical[b], lodTraceVertexSlotSourceIndex[b], lodTraceVertexSlotSerial[b],
-                        lodTraceVertexSlotPhysical[c], lodTraceVertexSlotSourceIndex[c], lodTraceVertexSlotSerial[c],
-                        geometryMode, curTransformIndex, curViewProjIndex);
+            if (localValid) {
+                const RSP::Vertex &va = vertices[a];
+                const RSP::Vertex &vb = vertices[b];
+                const RSP::Vertex &vc = vertices[c];
+                const int maxDelta = lodTraceMaxAbsTriangleDelta(va, vb, vc);
+                const bool flatZeroY = (va.y == 0) && (vb.y == 0) && (vc.y == 0);
+                const bool candidateTri = lodTraceVertexSlotSuspiciousLoad[a] ||
+                    lodTraceVertexSlotSuspiciousLoad[b] || lodTraceVertexSlotSuspiciousLoad[c];
+                const bool suspiciousTri = lodTraceVertexCoordSuspicious(va) ||
+                    lodTraceVertexCoordSuspicious(vb) || lodTraceVertexCoordSuspicious(vc);
+                const bool outlierTri = suspiciousTri || lodTraceVertexCoordOutlier(va) ||
+                    lodTraceVertexCoordOutlier(vb) || lodTraceVertexCoordOutlier(vc) ||
+                    (maxDelta > LodTraceTriangleOutlierThreshold);
+                const bool shouldLogTri = candidateTri || (outlierTri && !flatZeroY);
+                if (shouldLogTri) {
+                    if (outlierTriTraceCount < 512) {
+                        const char *level = suspiciousTri ? "SUSPICIOUS" : (candidateTri ? "CANDIDATE" : "OUTLIER");
+                        const uint32_t cluster = lodTraceVertexSlotPhysical[a] & 0xFFFFF000U;
+                        fprintf(stderr,
+                            "[RT64-GEOM][TRI-OUTLIER] #%u level=%s cluster=0x%08X local=(%u,%u,%u) global=(%u,%u,%u) max_delta=%d flat_y0=%u cand=%u xyzA=(%d,%d,%d) xyzB=(%d,%d,%d) xyzC=(%d,%d,%d) srcA=0x%08X/+%u/L%u/%u srcB=0x%08X/+%u/L%u/%u srcC=0x%08X/+%u/L%u/%u geom=0x%08X xform=%u vp=%u\n",
+                            outlierTriTraceCount + 1, level, cluster, a, b, c, globalIndices[0], globalIndices[1], globalIndices[2], maxDelta,
+                            flatZeroY ? 1U : 0U, candidateTri ? 1U : 0U,
+                            va.x, va.y, va.z, vb.x, vb.y, vb.z, vc.x, vc.y, vc.z,
+                            lodTraceVertexSlotPhysical[a], lodTraceVertexSlotSourceIndex[a], lodTraceVertexSlotSerial[a], lodTraceVertexSlotSuspiciousLoad[a] ? 1U : 0U,
+                            lodTraceVertexSlotPhysical[b], lodTraceVertexSlotSourceIndex[b], lodTraceVertexSlotSerial[b], lodTraceVertexSlotSuspiciousLoad[b] ? 1U : 0U,
+                            lodTraceVertexSlotPhysical[c], lodTraceVertexSlotSourceIndex[c], lodTraceVertexSlotSerial[c], lodTraceVertexSlotSuspiciousLoad[c] ? 1U : 0U,
+                            geometryMode, curTransformIndex, curViewProjIndex);
+                    }
+                    else if (outlierTriTraceCount == 512) {
+                        fprintf(stderr, "[RT64-GEOM][TRI-OUTLIER] trace limit reached; suppressing further outlier triangle logs\n");
+                    }
+                    outlierTriTraceCount++;
                 }
-                else if (suspiciousTriTraceCount == 512) {
-                    fprintf(stderr, "[RT64-GEOM][TRI-SUSPICIOUS] trace limit reached; suppressing further suspicious triangle logs\n");
+
+#if LOD_ENABLE_RENDER_CLUSTER_TINT
+                if (candidateTri) {
+                    drawCall.geometryMode &= ~G_LIGHTING;
                 }
-                suspiciousTriTraceCount++;
+#endif
             }
         }
 #endif
