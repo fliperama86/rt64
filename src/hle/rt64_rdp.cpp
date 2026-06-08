@@ -5,6 +5,7 @@
 #include "rt64_rdp.h"
 
 #include <cassert>
+#include <cstdio>
 
 #include "../include/rt64_extended_gbi.h"
 
@@ -23,6 +24,14 @@
 //#   define LOG_COLOR_DEPTH_IMAGE_METHODS
 //#   define LOG_TEXTURE_IMAGE_METHODS
 //#   define LOG_LOAD_METHODS
+#endif
+
+#ifndef LOD_ENABLE_RENDER_ADDR_TRACE
+#define LOD_ENABLE_RENDER_ADDR_TRACE 0
+#endif
+
+#ifndef LOD_FIX_NI_RDP_EXTENDED_ADDRS
+#define LOD_FIX_NI_RDP_EXTENDED_ADDRS 0
 #endif
 
 namespace RT64 {
@@ -238,13 +247,55 @@ namespace RT64 {
 
     constexpr uint32_t ExtendedMask = 0x80000000U;
 
+    static bool lodIsNiExtendedAddress(uint32_t address) {
+        const uint32_t hi = (address >> 24) & 0xFF;
+        return (hi == 0x8E) || (hi == 0x8F);
+    }
+
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+    static void lodTraceRdpAddress(const char *path, uint32_t in, uint32_t out) {
+        static uint32_t traceCount = 0;
+        if (traceCount < 256) {
+            fprintf(stderr, "[RT64-ADDR][RDP] %s in=0x%08X out=0x%08X\n", path, in, out);
+        }
+        else if (traceCount == 256) {
+            fprintf(stderr, "[RT64-ADDR][RDP] trace limit reached; suppressing further address logs\n");
+        }
+        traceCount++;
+    }
+#endif
+
     uint32_t RDP::maskAddress(uint32_t address) {
+#if LOD_FIX_NI_RDP_EXTENDED_ADDRS
+        // LoD NI overlay assets are mirrored into rdram+0x8E/0x8Fxxxxxx by
+        // recompiled CPU code. Preserve those addresses for RDP image/texture
+        // state instead of stripping the extended-RDRAM bit to 0x0E/0x0F.
+        if (lodIsNiExtendedAddress(address)) {
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+            lodTraceRdpAddress("maskAddress-ni-preserve", address, address);
+#endif
+            return address;
+        }
+#endif
+
+        uint32_t masked = 0;
         if (state->extended.extendRDRAM && ((address & ExtendedMask) == ExtendedMask)) {
-            return address - ExtendedMask;
+            masked = address - ExtendedMask;
         }
         else {
-            return address & RDP_ADDRESS_MASK;
+            masked = address & RDP_ADDRESS_MASK;
         }
+
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+        const uint32_t inHi = (address >> 24) & 0xFF;
+        const uint32_t outHi = (masked >> 24) & 0xFF;
+        if ((inHi == 0x86) || (inHi == 0x8E) || (inHi == 0x8F) ||
+            (outHi == 0x86) || (outHi == 0x8E) || (outHi == 0x8F)) {
+            lodTraceRdpAddress("maskAddress", address, masked);
+        }
+#endif
+
+        return masked;
     }
 
     void RDP::setColorImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t address) {

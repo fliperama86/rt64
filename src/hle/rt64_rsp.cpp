@@ -5,6 +5,7 @@
 #include "rt64_rsp.h"
 
 #include <cassert>
+#include <cstdio>
 
 #include "../include/rt64_extended_gbi.h"
 #include "common/rt64_common.h"
@@ -25,6 +26,18 @@ extern "C" {
 #include "rt64_state.h"
 
 //#define LOG_SPECIAL_MATRIX_OPERATIONS
+
+#ifndef LOD_ENABLE_RENDER_ADDR_TRACE
+#define LOD_ENABLE_RENDER_ADDR_TRACE 0
+#endif
+
+#ifndef LOD_FIX_DIRECT_SEGMENT_86_ADDRS
+#define LOD_FIX_DIRECT_SEGMENT_86_ADDRS 0
+#endif
+
+#ifndef LOD_FIX_NI_RSP_EXTENDED_ADDRS
+#define LOD_FIX_NI_RSP_EXTENDED_ADDRS 0
+#endif
 
 namespace RT64 {
     // RSP
@@ -105,6 +118,31 @@ namespace RT64 {
 
     constexpr uint32_t ExtendedMask = 0x80000000U;
 
+    static bool lodIsNiExtendedAddress(uint32_t address) {
+        const uint32_t hi = (address >> 24) & 0xFF;
+        return (hi == 0x8E) || (hi == 0x8F);
+    }
+
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+    static void lodTraceRspAddress(const char *path, uint32_t in, uint32_t out, uint32_t aux = 0) {
+        static uint32_t traceCount = 0;
+        if (traceCount < 256) {
+            fprintf(stderr, "[RT64-ADDR][RSP] %s in=0x%08X out=0x%08X aux=0x%08X\n", path, in, out, aux);
+        }
+        else if (traceCount == 256) {
+            fprintf(stderr, "[RT64-ADDR][RSP] trace limit reached; suppressing further address logs\n");
+        }
+        traceCount++;
+    }
+
+    static bool lodShouldTraceRspAddress(uint32_t in, uint32_t out) {
+        const uint32_t inHi = (in >> 24) & 0xFF;
+        const uint32_t outHi = (out >> 24) & 0xFF;
+        return (inHi == 0x86) || (inHi == 0x8E) || (inHi == 0x8F) ||
+            (outHi == 0x86) || (outHi == 0x8E) || (outHi == 0x8F);
+    }
+#endif
+
     // Masks addresses as the RSP DMA hardware would.
     template<uint32_t mask> uint32_t RSP::maskPhysicalAddress(uint32_t address) {
         if (state->extended.extendRDRAM && ((address & ExtendedMask) == ExtendedMask)) {
@@ -117,8 +155,21 @@ namespace RT64 {
 
     // Performs a lookup in the segment table to convert the given address.
     uint32_t RSP::fromSegmented(uint32_t segAddress) {
+        const uint32_t originalSegAddress = segAddress;
+
+#if LOD_FIX_DIRECT_SEGMENT_86_ADDRS
+        // LoD sometimes emits direct display-list operands in the invalid
+        // 0x86xxxxxx range. The top bit makes RT64 treat them as raw extended
+        // RDRAM before segment lookup; interpret them as segment-6 references
+        // instead, matching the existing 0x86 segment-base normalization below.
+        if (((segAddress >> 24) & 0xFF) == 0x86) {
+            segAddress = 0x06000000U | (segAddress & 0x00FFFFFFU);
+        }
+#endif
+
+        uint32_t resolved = 0;
         if (state->extended.extendRDRAM && ((segAddress & ExtendedMask) == ExtendedMask)) {
-            return segAddress;
+            resolved = segAddress;
         }
         else {
             uint32_t seg = ((segAddress) >> 24) & 0x0F;
@@ -131,8 +182,16 @@ namespace RT64 {
                 if (seg == 0x0F && g_tlb_segment_0f != 0) base = g_tlb_segment_0f;
                 else if (seg == 0x0E && g_tlb_segment_0e != 0) base = g_tlb_segment_0e;
             }
-            return base + ((segAddress) & 0x00FFFFFF);
+            resolved = base + ((segAddress) & 0x00FFFFFF);
         }
+
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+        if (lodShouldTraceRspAddress(originalSegAddress, resolved) || (originalSegAddress != segAddress)) {
+            lodTraceRspAddress("fromSegmented", originalSegAddress, resolved, segAddress);
+        }
+#endif
+
+        return resolved;
     }
 
     // Converts the given segmented address and then applies the RSP DMA physical address mask.
@@ -141,13 +200,26 @@ namespace RT64 {
         uint32_t resolved = fromSegmented(segAddress);
         // LoD: TLB segment addresses (0x8E/0x8F region) bypass the 8MB DMA mask
         // — they point to the extended RDRAM region where NI overlay code writes.
-        uint32_t hi = (resolved >> 24) & 0xFF;
-        if (hi == 0x8E || hi == 0x8F) return resolved;
+        if (lodIsNiExtendedAddress(resolved)) {
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+            lodTraceRspAddress("fromSegmentedMasked-ni", segAddress, resolved);
+#endif
+            return resolved;
+        }
         return maskPhysicalAddress<0x00FFFFF8>(resolved);
     }
 
     uint32_t RSP::fromSegmentedMaskedPD(uint32_t segAddress) {
-        return maskPhysicalAddress<0x00FFFFFC>(fromSegmented(segAddress));
+        uint32_t resolved = fromSegmented(segAddress);
+#if LOD_FIX_NI_RSP_EXTENDED_ADDRS
+        if (lodIsNiExtendedAddress(resolved)) {
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+            lodTraceRspAddress("fromSegmentedMaskedPD-ni", segAddress, resolved);
+#endif
+            return resolved;
+        }
+#endif
+        return maskPhysicalAddress<0x00FFFFFC>(resolved);
     }
 
     void RSP::setSegment(uint32_t seg, uint32_t address) {
@@ -157,7 +229,11 @@ namespace RT64 {
         // Treat them as KSEG0/RDRAM pointers so small HUD/effect/item textures
         // resolve to populated rdram+0x001xxxxx instead of empty rdram+0x061xxxxx.
         if (((address >> 24) & 0xFF) == 0x86) {
+            const uint32_t originalAddress = address;
             address = 0x80000000U | (address & 0x00FFFFFFU);
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+            lodTraceRspAddress("setSegment-86-base", originalAddress, address, seg);
+#endif
         }
 #endif
         segments[seg] = address;

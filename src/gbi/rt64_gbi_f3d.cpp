@@ -5,6 +5,7 @@
 #include "rt64_gbi_f3d.h"
 
 #include <cassert>
+#include <cstdio>
 
 #include "../include/rt64_extended_gbi.h"
 
@@ -12,6 +13,10 @@
 #include "rt64_f3d.h"
 #include "rt64_gbi_extended.h"
 #include "rt64_gbi_rdp.h"
+
+#ifndef LOD_ENABLE_RENDER_ADDR_TRACE
+#define LOD_ENABLE_RENDER_ADDR_TRACE 0
+#endif
 
 namespace RT64 {
     namespace GBI_F3D {
@@ -101,6 +106,17 @@ namespace RT64 {
                 bool likelyGBI = (firstOpcode <= 0x0B) || (firstOpcode >= 0xB4);
                 bool isEmpty = (target->w0 == 0 && target->w1 == 0);
                 if (isEmpty || !likelyGBI) {
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+                    static uint32_t invalidDlSkipCount = 0;
+                    if (invalidDlSkipCount < 64) {
+                        fprintf(stderr, "[RT64-DL][GUARD] skip src=0x%08X phys=0x%08X op=0x%02X w0=0x%08X w1=0x%08X empty=%u\n",
+                            (*dl)->w1, rdramAddress, firstOpcode, target->w0, target->w1, isEmpty ? 1U : 0U);
+                    }
+                    else if (invalidDlSkipCount == 64) {
+                        fprintf(stderr, "[RT64-DL][GUARD] trace limit reached; suppressing further invalid-sub-DL logs\n");
+                    }
+                    invalidDlSkipCount++;
+#endif
                     return;
                 }
             }
