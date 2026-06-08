@@ -1498,6 +1498,7 @@ namespace RT64 {
         }
 
 #if LOD_ENABLE_RENDER_GEOM_TRACE
+        bool lodTraceDropTri = false;
         if (!rawGlobalIndices) {
             static uint32_t outlierTriTraceCount = 0;
             const bool localValid = (a < RSP_MAX_VERTICES) && (b < RSP_MAX_VERTICES) && (c < RSP_MAX_VERTICES);
@@ -1545,11 +1546,19 @@ namespace RT64 {
 
 #if LOD_ENABLE_RENDER_CLUSTER_TINT
                 if (earlySceneTri) {
-                    drawCall.geometryMode &= ~G_LIGHTING;
+                    // Visual marker for manual isolation: dropping candidate triangles is more
+                    // reliable than tinting when texture/combiner state dominates vertex color.
+                    lodTraceDropTri = true;
                 }
 #endif
             }
         }
+
+#if LOD_ENABLE_RENDER_CLUSTER_TINT
+        if (lodTraceDropTri) {
+            return;
+        }
+#endif
 #endif
 
         // Indicates the vertex has been used in a tri. Whatever routines modify the vertex afterwards must use a new index instead.
