@@ -55,12 +55,21 @@ namespace RT64 {
     constexpr float DepthRange = 1024.0f;
 
 #if LOD_ENABLE_RENDER_GEOM_TRACE
+    extern "C" {
+        extern uint32_t g_lod_render_dl_root_segmented;
+        extern uint32_t g_lod_render_dl_root_physical;
+        extern uint32_t g_lod_render_dl_root_early_scene;
+    }
+
     constexpr int LodTraceTriangleOutlierThreshold = 4096;
 
     static uint32_t lodTraceVertexSlotSegmented[RSP_MAX_VERTICES] = {};
     static uint32_t lodTraceVertexSlotPhysical[RSP_MAX_VERTICES] = {};
     static uint32_t lodTraceVertexSlotSourceIndex[RSP_MAX_VERTICES] = {};
     static uint32_t lodTraceVertexSlotSerial[RSP_MAX_VERTICES] = {};
+    static uint32_t lodTraceVertexSlotDlRootSegmented[RSP_MAX_VERTICES] = {};
+    static uint32_t lodTraceVertexSlotDlRootPhysical[RSP_MAX_VERTICES] = {};
+    static bool lodTraceVertexSlotEarlySceneRoot[RSP_MAX_VERTICES] = {};
     static bool lodTraceVertexSlotSuspiciousLoad[RSP_MAX_VERTICES] = {};
     static uint32_t lodTraceVertexLoadSerial = 0;
 
@@ -98,13 +107,8 @@ namespace RT64 {
             return false;
         }
 
-        // Current best candidate from the intro forest trace: animated/model vertices loaded from
-        // 0x003784E8..0x00378738. The valid visible triangles only reference the first 10 vertices;
-        // later "extreme" tail entries are display-list/data bytes and should not drive the tint.
-        const uint32_t phys = lodTraceVertexSlotPhysical[slot];
-        return lodTraceVertexSlotSuspiciousLoad[slot] &&
-            (phys >= 0x00378000U) && (phys < 0x00379000U) &&
-            (lodTraceVertexSlotSourceIndex[slot] < 10);
+        // Early forest/skirt scene roots observed before MAP_OVL #2.
+        return lodTraceVertexSlotEarlySceneRoot[slot];
 #else
         (void)slot;
         return false;
@@ -123,6 +127,9 @@ namespace RT64 {
             lodTraceVertexSlotPhysical[slot] = rdramAddress + (i * vertexSize);
             lodTraceVertexSlotSourceIndex[slot] = i;
             lodTraceVertexSlotSerial[slot] = serial;
+            lodTraceVertexSlotDlRootSegmented[slot] = g_lod_render_dl_root_segmented;
+            lodTraceVertexSlotDlRootPhysical[slot] = g_lod_render_dl_root_physical;
+            lodTraceVertexSlotEarlySceneRoot[slot] = g_lod_render_dl_root_early_scene != 0;
             lodTraceVertexSlotSuspiciousLoad[slot] = suspiciousLoad;
         }
     }
@@ -150,12 +157,15 @@ namespace RT64 {
         float maxValue = 0.0f;
         const bool suspicious = lodTraceFloatMatrixSuspicious(matrix, minValue, maxValue);
         const bool overlay = lodTraceIsOverlayAddress(segmentedAddress) || lodTraceIsOverlayAddress(rdramAddress);
-        if (suspicious || overlay) {
+        const bool earlyScene = g_lod_render_dl_root_early_scene != 0;
+        if (suspicious || overlay || earlyScene) {
             if (matrixTraceCount < 256) {
                 fprintf(stderr,
-                    "[RT64-GEOM][MTX] #%u kind=%s seg=0x%08X phys=0x%08X params=0x%02X min=%g max=%g row3=(%g,%g,%g,%g)%s\n",
-                    matrixTraceCount + 1, kind, segmentedAddress, rdramAddress, params, minValue, maxValue,
-                    matrix[3][0], matrix[3][1], matrix[3][2], matrix[3][3], suspicious ? " SUSPICIOUS" : "");
+                    "[RT64-GEOM][MTX] #%u kind=%s root=0x%08X/0x%08X seg=0x%08X phys=0x%08X params=0x%02X min=%g max=%g row3=(%g,%g,%g,%g)%s%s\n",
+                    matrixTraceCount + 1, kind, g_lod_render_dl_root_segmented, g_lod_render_dl_root_physical,
+                    segmentedAddress, rdramAddress, params, minValue, maxValue,
+                    matrix[3][0], matrix[3][1], matrix[3][2], matrix[3][3],
+                    suspicious ? " SUSPICIOUS" : "", earlyScene ? " EARLY_ROOT" : "");
             }
             else if (matrixTraceCount == 256) {
                 fprintf(stderr, "[RT64-GEOM][MTX] trace limit reached; suppressing further matrix logs\n");
@@ -188,15 +198,18 @@ namespace RT64 {
         }
 
         const bool overlay = lodTraceIsOverlayAddress(segmentedAddress) || lodTraceIsOverlayAddress(rdramAddress);
-        if (suspicious || overlay) {
+        const bool earlyScene = g_lod_render_dl_root_early_scene != 0;
+        if (suspicious || overlay || earlyScene) {
             if (vertexTraceCount < 512) {
                 const RSP::Vertex v0 = (vtxCount > 0) ? vertices[0] : RSP::Vertex{};
                 fprintf(stderr,
-                    "[RT64-GEOM][VTX] #%u kind=%s seg=0x%08X phys=0x%08X count=%u dst=%u min=(%d@+%u,%d@+%u,%d@+%u) max=(%d@+%u,%d@+%u,%d@+%u) v0=(%d,%d,%d) rgba=(%u,%u,%u,%u)%s\n",
-                    vertexTraceCount + 1, kind, segmentedAddress, rdramAddress, vtxCount, dstIndex,
+                    "[RT64-GEOM][VTX] #%u kind=%s root=0x%08X/0x%08X seg=0x%08X phys=0x%08X count=%u dst=%u min=(%d@+%u,%d@+%u,%d@+%u) max=(%d@+%u,%d@+%u,%d@+%u) v0=(%d,%d,%d) rgba=(%u,%u,%u,%u)%s%s\n",
+                    vertexTraceCount + 1, kind, g_lod_render_dl_root_segmented, g_lod_render_dl_root_physical,
+                    segmentedAddress, rdramAddress, vtxCount, dstIndex,
                     minX, minXIndex, minY, minYIndex, minZ, minZIndex,
                     maxX, maxXIndex, maxY, maxYIndex, maxZ, maxZIndex, v0.x, v0.y, v0.z,
-                    v0.color.r, v0.color.g, v0.color.b, v0.color.a, suspicious ? " SUSPICIOUS" : "");
+                    v0.color.r, v0.color.g, v0.color.b, v0.color.a,
+                    suspicious ? " SUSPICIOUS" : "", earlyScene ? " EARLY_ROOT" : "");
 
                 const uint32_t extremeIndices[6] = { minXIndex, minYIndex, minZIndex, maxXIndex, maxYIndex, maxZIndex };
                 for (uint32_t e = 0; e < 6; e++) {
@@ -234,13 +247,16 @@ namespace RT64 {
         const bool black = (light.dir.colr == 0) && (light.dir.colg == 0) && (light.dir.colb == 0) &&
             (light.dir.colcr == 0) && (light.dir.colcg == 0) && (light.dir.colcb == 0);
         const bool overlay = lodTraceIsOverlayAddress(segmentedAddress) || lodTraceIsOverlayAddress(rdramAddress);
-        if (black || overlay) {
+        const bool earlyScene = g_lod_render_dl_root_early_scene != 0;
+        if (black || overlay || earlyScene) {
             if (lightTraceCount < 256) {
                 fprintf(stderr,
-                    "[RT64-GEOM][LIGHT] #%u idx=%u seg=0x%08X phys=0x%08X col=(%u,%u,%u) colc=(%u,%u,%u) dir=(%d,%d,%d)%s\n",
-                    lightTraceCount + 1, index, segmentedAddress, rdramAddress,
+                    "[RT64-GEOM][LIGHT] #%u idx=%u root=0x%08X/0x%08X seg=0x%08X phys=0x%08X col=(%u,%u,%u) colc=(%u,%u,%u) dir=(%d,%d,%d)%s%s\n",
+                    lightTraceCount + 1, index, g_lod_render_dl_root_segmented, g_lod_render_dl_root_physical,
+                    segmentedAddress, rdramAddress,
                     light.dir.colr, light.dir.colg, light.dir.colb, light.dir.colcr, light.dir.colcg, light.dir.colcb,
-                    light.dir.dirx, light.dir.diry, light.dir.dirz, black ? " BLACK" : "");
+                    light.dir.dirx, light.dir.diry, light.dir.dirz,
+                    black ? " BLACK" : "", earlyScene ? " EARLY_ROOT" : "");
             }
             else if (lightTraceCount == 256) {
                 fprintf(stderr, "[RT64-GEOM][LIGHT] trace limit reached; suppressing further light logs\n");
@@ -1491,7 +1507,10 @@ namespace RT64 {
                 const RSP::Vertex &vc = vertices[c];
                 const int maxDelta = lodTraceMaxAbsTriangleDelta(va, vb, vc);
                 const bool flatZeroY = (va.y == 0) && (vb.y == 0) && (vc.y == 0);
-                const bool candidateTri = lodTraceVertexSlotSuspiciousLoad[a] ||
+                const bool earlySceneTri = (g_lod_render_dl_root_early_scene != 0) ||
+                    lodTraceVertexSlotEarlySceneRoot[a] ||
+                    lodTraceVertexSlotEarlySceneRoot[b] || lodTraceVertexSlotEarlySceneRoot[c];
+                const bool candidateTri = earlySceneTri || lodTraceVertexSlotSuspiciousLoad[a] ||
                     lodTraceVertexSlotSuspiciousLoad[b] || lodTraceVertexSlotSuspiciousLoad[c];
                 const bool suspiciousTri = lodTraceVertexCoordSuspicious(va) ||
                     lodTraceVertexCoordSuspicious(vb) || lodTraceVertexCoordSuspicious(vc);
@@ -1501,11 +1520,16 @@ namespace RT64 {
                 const bool shouldLogTri = candidateTri || (outlierTri && !flatZeroY);
                 if (shouldLogTri) {
                     if (outlierTriTraceCount < 512) {
-                        const char *level = suspiciousTri ? "SUSPICIOUS" : (candidateTri ? "CANDIDATE" : "OUTLIER");
+                        const char *level = suspiciousTri ? "SUSPICIOUS" : (earlySceneTri ? "EARLY_ROOT" : (candidateTri ? "CANDIDATE" : "OUTLIER"));
+                        const uint32_t rootSegmented = (g_lod_render_dl_root_early_scene != 0) ?
+                            g_lod_render_dl_root_segmented : lodTraceVertexSlotDlRootSegmented[a];
+                        const uint32_t rootPhysical = (g_lod_render_dl_root_early_scene != 0) ?
+                            g_lod_render_dl_root_physical : lodTraceVertexSlotDlRootPhysical[a];
                         const uint32_t cluster = lodTraceVertexSlotPhysical[a] & 0xFFFFF000U;
                         fprintf(stderr,
-                            "[RT64-GEOM][TRI-OUTLIER] #%u level=%s cluster=0x%08X local=(%u,%u,%u) global=(%u,%u,%u) max_delta=%d flat_y0=%u cand=%u xyzA=(%d,%d,%d) xyzB=(%d,%d,%d) xyzC=(%d,%d,%d) srcA=0x%08X/+%u/L%u/%u srcB=0x%08X/+%u/L%u/%u srcC=0x%08X/+%u/L%u/%u geom=0x%08X xform=%u vp=%u\n",
-                            outlierTriTraceCount + 1, level, cluster, a, b, c, globalIndices[0], globalIndices[1], globalIndices[2], maxDelta,
+                            "[RT64-GEOM][TRI-OUTLIER] #%u level=%s cluster=0x%08X root=0x%08X/0x%08X local=(%u,%u,%u) global=(%u,%u,%u) max_delta=%d flat_y0=%u cand=%u xyzA=(%d,%d,%d) xyzB=(%d,%d,%d) xyzC=(%d,%d,%d) srcA=0x%08X/+%u/L%u/%u srcB=0x%08X/+%u/L%u/%u srcC=0x%08X/+%u/L%u/%u geom=0x%08X xform=%u vp=%u\n",
+                            outlierTriTraceCount + 1, level, cluster, rootSegmented, rootPhysical,
+                            a, b, c, globalIndices[0], globalIndices[1], globalIndices[2], maxDelta,
                             flatZeroY ? 1U : 0U, candidateTri ? 1U : 0U,
                             va.x, va.y, va.z, vb.x, vb.y, vb.z, vc.x, vc.y, vc.z,
                             lodTraceVertexSlotPhysical[a], lodTraceVertexSlotSourceIndex[a], lodTraceVertexSlotSerial[a], lodTraceVertexSlotSuspiciousLoad[a] ? 1U : 0U,
@@ -1520,7 +1544,7 @@ namespace RT64 {
                 }
 
 #if LOD_ENABLE_RENDER_CLUSTER_TINT
-                if (candidateTri) {
+                if (earlySceneTri) {
                     drawCall.geometryMode &= ~G_LIGHTING;
                 }
 #endif

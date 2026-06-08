@@ -29,6 +29,59 @@
 namespace RT64 {
     namespace GBI_F3D {
 #if LOD_ENABLE_RENDER_GEOM_TRACE
+        extern "C" {
+            uint32_t g_lod_render_dl_root_segmented = 0;
+            uint32_t g_lod_render_dl_root_physical = 0;
+            uint32_t g_lod_render_dl_root_early_scene = 0;
+        }
+
+        struct LodTraceDlRootContext {
+            uint32_t segmentedAddress;
+            uint32_t rdramAddress;
+            uint32_t earlyScene;
+        };
+
+        static LodTraceDlRootContext lodTraceDlRootStack[64] = {};
+        static uint32_t lodTraceDlRootStackDepth = 0;
+
+        static bool lodTraceIsEarlySceneRoot(uint32_t segmentedAddress) {
+            return (segmentedAddress == 0x0F002230U) || (segmentedAddress == 0x0F0022A8U);
+        }
+
+        static void lodTraceSetEarlyDlRoot(uint32_t segmentedAddress, uint32_t rdramAddress) {
+            if (lodTraceIsEarlySceneRoot(segmentedAddress)) {
+                g_lod_render_dl_root_segmented = segmentedAddress;
+                g_lod_render_dl_root_physical = rdramAddress;
+                g_lod_render_dl_root_early_scene = 1;
+            }
+        }
+
+        static void lodTracePushDlRoot(uint32_t segmentedAddress, uint32_t rdramAddress) {
+            if (lodTraceDlRootStackDepth < 64) {
+                lodTraceDlRootStack[lodTraceDlRootStackDepth++] = {
+                    g_lod_render_dl_root_segmented,
+                    g_lod_render_dl_root_physical,
+                    g_lod_render_dl_root_early_scene
+                };
+            }
+
+            lodTraceSetEarlyDlRoot(segmentedAddress, rdramAddress);
+        }
+
+        static void lodTracePopDlRoot() {
+            if (lodTraceDlRootStackDepth > 0) {
+                const LodTraceDlRootContext context = lodTraceDlRootStack[--lodTraceDlRootStackDepth];
+                g_lod_render_dl_root_segmented = context.segmentedAddress;
+                g_lod_render_dl_root_physical = context.rdramAddress;
+                g_lod_render_dl_root_early_scene = context.earlyScene;
+            }
+            else {
+                g_lod_render_dl_root_segmented = 0;
+                g_lod_render_dl_root_physical = 0;
+                g_lod_render_dl_root_early_scene = 0;
+            }
+        }
+
         static bool lodTraceIsOverlayAddress(uint32_t address) {
             const uint32_t hi = (address >> 24) & 0xFFU;
             return (hi == 0x0E) || (hi == 0x0F) || (hi == 0x8E) || (hi == 0x8F);
@@ -352,14 +405,27 @@ namespace RT64 {
 
 
             if ((*dl)->p0(16, 1) == 0) {
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+                lodTracePushDlRoot((*dl)->w1, rdramAddress);
+#endif
                 state->pushReturnAddress(*dl);
             }
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+            else {
+                // Branch-style G_DL replaces the current list and does not push a return address.
+                // It still needs to establish root context for diagnostics/tinting.
+                lodTraceSetEarlyDlRoot((*dl)->w1, rdramAddress);
+            }
+#endif
 
             *dl = target - 1;
         }
 
         void endDl(State *state, DisplayList **dl) {
             *dl = state->popReturnAddress();
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+            lodTracePopDlRoot();
+#endif
         }
 
         void sprite2DBase(State *state, DisplayList **dl) {
