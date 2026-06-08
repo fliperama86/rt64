@@ -5,6 +5,7 @@
 #include "rt64_gbi_f3d.h"
 
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 
 #include "../include/rt64_extended_gbi.h"
@@ -18,8 +19,53 @@
 #define LOD_ENABLE_RENDER_ADDR_TRACE 0
 #endif
 
+#ifndef LOD_ENABLE_RENDER_GEOM_TRACE
+#define LOD_ENABLE_RENDER_GEOM_TRACE 0
+#endif
+
 namespace RT64 {
     namespace GBI_F3D {
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+        static bool lodTraceIsOverlayAddress(uint32_t address) {
+            const uint32_t hi = (address >> 24) & 0xFFU;
+            return (hi == 0x0E) || (hi == 0x0F) || (hi == 0x8E) || (hi == 0x8F);
+        }
+
+        static uint32_t lodTraceDisplayListPointerOffset(State *state, const DisplayList *ptr) {
+            const uintptr_t base = reinterpret_cast<uintptr_t>(state->RDRAM);
+            const uintptr_t cur = reinterpret_cast<uintptr_t>(ptr);
+            if (cur >= base) {
+                const uintptr_t diff = cur - base;
+                if (diff <= 0xFFFFFFFFULL) {
+                    return static_cast<uint32_t>(diff);
+                }
+            }
+            return 0xFFFFFFFFU;
+        }
+
+        static void lodTraceRunDl(State *state, const DisplayList *caller, uint32_t segmentedAddress, uint32_t rdramAddress, const DisplayList *target, bool invalid, bool empty, uint8_t firstOpcode) {
+            static uint32_t runDlTraceCount = 0;
+            const bool overlay = lodTraceIsOverlayAddress(segmentedAddress) || lodTraceIsOverlayAddress(rdramAddress);
+            if ((invalid || overlay) && (runDlTraceCount < 512)) {
+                const uint32_t callerOffset = lodTraceDisplayListPointerOffset(state, caller);
+                fprintf(stderr,
+                    "[RT64-GEOM][DL] #%u caller=0x%08X src=0x%08X phys=0x%08X op=0x%02X w0=0x%08X w1=0x%08X empty=%u invalid=%u\n",
+                    runDlTraceCount + 1, callerOffset, segmentedAddress, rdramAddress, firstOpcode,
+                    target->w0, target->w1, empty ? 1U : 0U, invalid ? 1U : 0U);
+                if (invalid && !empty) {
+                    for (uint32_t i = 0; i < 8; i++) {
+                        fprintf(stderr, "[RT64-GEOM][DL-DUMP] #%u +%02u w0=0x%08X w1=0x%08X\n",
+                            runDlTraceCount + 1, i, target[i].w0, target[i].w1);
+                    }
+                }
+            }
+            else if (runDlTraceCount == 512) {
+                fprintf(stderr, "[RT64-GEOM][DL] trace limit reached; suppressing further display-list logs\n");
+            }
+            runDlTraceCount++;
+        }
+#endif
+
         void matrix(State *state, DisplayList **dl) {
             state->rsp->matrix((*dl)->w1, (*dl)->p0(16, 8));
         }
@@ -105,6 +151,9 @@ namespace RT64 {
                 uint8_t firstOpcode = (target->w0 >> 24) & 0xFF;
                 bool likelyGBI = (firstOpcode <= 0x0B) || (firstOpcode >= 0xB4);
                 bool isEmpty = (target->w0 == 0 && target->w1 == 0);
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+                lodTraceRunDl(state, *dl, (*dl)->w1, rdramAddress, target, isEmpty || !likelyGBI, isEmpty, firstOpcode);
+#endif
                 if (isEmpty || !likelyGBI) {
 #if LOD_ENABLE_RENDER_ADDR_TRACE
                     static uint32_t invalidDlSkipCount = 0;

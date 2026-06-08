@@ -4,7 +4,9 @@
 
 #include "rt64_rsp.h"
 
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 
 #include "../include/rt64_extended_gbi.h"
@@ -39,10 +41,109 @@ extern "C" {
 #define LOD_FIX_NI_RSP_EXTENDED_ADDRS 0
 #endif
 
+#ifndef LOD_ENABLE_RENDER_GEOM_TRACE
+#define LOD_ENABLE_RENDER_GEOM_TRACE 0
+#endif
+
 namespace RT64 {
     // RSP
 
     constexpr float DepthRange = 1024.0f;
+
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+    static bool lodTraceIsOverlayAddress(uint32_t address) {
+        const uint32_t hi = (address >> 24) & 0xFFU;
+        return (hi == 0x0E) || (hi == 0x0F) || (hi == 0x8E) || (hi == 0x8F);
+    }
+
+    static bool lodTraceFloatMatrixSuspicious(const hlslpp::float4x4 &matrix, float &minValue, float &maxValue) {
+        bool suspicious = false;
+        minValue = matrix[0][0];
+        maxValue = matrix[0][0];
+        for (uint32_t row = 0; row < 4; row++) {
+            for (uint32_t column = 0; column < 4; column++) {
+                const float value = matrix[row][column];
+                if (!std::isfinite(value) || (std::fabs(value) > 65536.0f)) {
+                    suspicious = true;
+                }
+                minValue = std::min(minValue, value);
+                maxValue = std::max(maxValue, value);
+            }
+        }
+        return suspicious;
+    }
+
+    static void lodTraceMatrixLoad(const char *kind, uint32_t segmentedAddress, uint32_t rdramAddress, uint8_t params, const hlslpp::float4x4 &matrix) {
+        static uint32_t matrixTraceCount = 0;
+        float minValue = 0.0f;
+        float maxValue = 0.0f;
+        const bool suspicious = lodTraceFloatMatrixSuspicious(matrix, minValue, maxValue);
+        const bool overlay = lodTraceIsOverlayAddress(segmentedAddress) || lodTraceIsOverlayAddress(rdramAddress);
+        if ((suspicious || overlay) && (matrixTraceCount < 256)) {
+            fprintf(stderr,
+                "[RT64-GEOM][MTX] #%u kind=%s seg=0x%08X phys=0x%08X params=0x%02X min=%g max=%g row3=(%g,%g,%g,%g)%s\n",
+                matrixTraceCount + 1, kind, segmentedAddress, rdramAddress, params, minValue, maxValue,
+                matrix[3][0], matrix[3][1], matrix[3][2], matrix[3][3], suspicious ? " SUSPICIOUS" : "");
+        }
+        else if (matrixTraceCount == 256) {
+            fprintf(stderr, "[RT64-GEOM][MTX] trace limit reached; suppressing further matrix logs\n");
+        }
+        matrixTraceCount++;
+    }
+
+    static void lodTraceVertexLoad(const char *kind, uint32_t segmentedAddress, uint32_t rdramAddress, uint32_t vtxCount, uint32_t dstIndex, const RSP::Vertex *vertices) {
+        static uint32_t vertexTraceCount = 0;
+        int16_t minX = 0, minY = 0, minZ = 0, maxX = 0, maxY = 0, maxZ = 0;
+        bool suspicious = (vtxCount == 0) || (vtxCount > 64);
+        if (vtxCount > 0) {
+            minX = maxX = vertices[0].x;
+            minY = maxY = vertices[0].y;
+            minZ = maxZ = vertices[0].z;
+            for (uint32_t i = 0; i < vtxCount; i++) {
+                const RSP::Vertex &v = vertices[i];
+                minX = std::min(minX, v.x); maxX = std::max(maxX, v.x);
+                minY = std::min(minY, v.y); maxY = std::max(maxY, v.y);
+                minZ = std::min(minZ, v.z); maxZ = std::max(maxZ, v.z);
+                if ((std::abs(int(v.x)) > 20000) || (std::abs(int(v.y)) > 20000) || (std::abs(int(v.z)) > 20000)) {
+                    suspicious = true;
+                }
+            }
+        }
+
+        const bool overlay = lodTraceIsOverlayAddress(segmentedAddress) || lodTraceIsOverlayAddress(rdramAddress);
+        if ((suspicious || overlay) && (vertexTraceCount < 512)) {
+            const RSP::Vertex &v0 = vertices[0];
+            fprintf(stderr,
+                "[RT64-GEOM][VTX] #%u kind=%s seg=0x%08X phys=0x%08X count=%u dst=%u min=(%d,%d,%d) max=(%d,%d,%d) v0=(%d,%d,%d) rgba=(%u,%u,%u,%u)%s\n",
+                vertexTraceCount + 1, kind, segmentedAddress, rdramAddress, vtxCount, dstIndex,
+                minX, minY, minZ, maxX, maxY, maxZ, v0.x, v0.y, v0.z,
+                v0.color.r, v0.color.g, v0.color.b, v0.color.a, suspicious ? " SUSPICIOUS" : "");
+        }
+        else if (vertexTraceCount == 512) {
+            fprintf(stderr, "[RT64-GEOM][VTX] trace limit reached; suppressing further vertex logs\n");
+        }
+        vertexTraceCount++;
+    }
+
+    static void lodTraceLightLoad(uint8_t index, uint32_t segmentedAddress, uint32_t rdramAddress, const RSP::Light &light) {
+        static uint32_t lightTraceCount = 0;
+        const bool black = (light.dir.colr == 0) && (light.dir.colg == 0) && (light.dir.colb == 0) &&
+            (light.dir.colcr == 0) && (light.dir.colcg == 0) && (light.dir.colcb == 0);
+        const bool overlay = lodTraceIsOverlayAddress(segmentedAddress) || lodTraceIsOverlayAddress(rdramAddress);
+        if ((black || overlay) && (lightTraceCount < 256)) {
+            fprintf(stderr,
+                "[RT64-GEOM][LIGHT] #%u idx=%u seg=0x%08X phys=0x%08X col=(%u,%u,%u) colc=(%u,%u,%u) dir=(%d,%d,%d)%s\n",
+                lightTraceCount + 1, index, segmentedAddress, rdramAddress,
+                light.dir.colr, light.dir.colg, light.dir.colb, light.dir.colcr, light.dir.colcg, light.dir.colcb,
+                light.dir.dirx, light.dir.diry, light.dir.dirz, black ? " BLACK" : "");
+        }
+        else if (lightTraceCount == 256) {
+            fprintf(stderr, "[RT64-GEOM][LIGHT] trace limit reached; suppressing further light logs\n");
+        }
+        lightTraceCount++;
+    }
+#endif
+
 
     RSP::RSP(State *state) {
         this->state = state;
@@ -299,6 +400,9 @@ namespace RT64 {
         const uint32_t rdramAddress = fromSegmentedMasked(address);
         const FixedMatrix *fixedMatrix = reinterpret_cast<FixedMatrix *>(state->fromRDRAM(rdramAddress));
         const hlslpp::float4x4 floatMatrix = fixedMatrix->toMatrix4x4();
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+        lodTraceMatrixLoad("fixed", address, rdramAddress, params, floatMatrix);
+#endif
         matrixCommon(floatMatrix, address, params);
     }
 
@@ -311,6 +415,9 @@ namespace RT64 {
             floats[8], floats[9], floats[10], floats[11],
             floats[12], floats[13], floats[14], floats[15]
         );
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+        lodTraceMatrixLoad("float", address, rdramAddress, params, floatMatrix);
+#endif
 
         matrixCommon(floatMatrix, address, params);
     }
@@ -477,6 +584,9 @@ namespace RT64 {
 
         const uint32_t rdramAddress = fromSegmentedMasked(address);
         const Vertex *dlVerts = reinterpret_cast<const Vertex *>(state->fromRDRAM(rdramAddress));
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+        lodTraceVertexLoad("std", address, rdramAddress, vtxCount, dstIndex, dlVerts);
+#endif
         memcpy(&vertices[dstIndex], dlVerts, sizeof(Vertex) * vtxCount);
         setVertexCommon<true, sizeof(Vertex)>(rdramAddress, dstIndex, dstIndex + vtxCount);
     }
@@ -503,6 +613,9 @@ namespace RT64 {
             dst.color.b = col[1];
             dst.color.a = col[0];
         }
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+        lodTraceVertexLoad("pd", address, rdramAddress, vtxCount, dstIndex, &vertices[dstIndex]);
+#endif
 
         setVertexCommon<true, sizeof(VertexPD)>(rdramAddress, dstIndex, dstIndex + vtxCount);
     }
@@ -528,6 +641,9 @@ namespace RT64 {
             tcVelFloats.emplace_back(0.0f);
             vertices[dstIndex + i] = src.v;
         }
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+        lodTraceVertexLoad("exv1", address, rdramAddress, vtxCount, dstIndex, &vertices[dstIndex]);
+#endif
 
         setVertexCommon<false, sizeof(VertexEXV1)>(rdramAddress, dstIndex, dstIndex + vtxCount);
     }
@@ -942,7 +1058,20 @@ namespace RT64 {
         const uint32_t globalIndex = indices[vtxIndex];
         const float screenZ = workload.drawData.posScreen[globalIndex][2] * DepthRange;
         const float zValueFloat = zValue / 65536.0f;
-        if (forceBranch || (screenZ < zValueFloat)) {
+        const bool taken = forceBranch || (screenZ < zValueFloat);
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+        static uint32_t branchZTraceCount = 0;
+        if (branchZTraceCount < 256) {
+            const uint32_t targetAddress = fromSegmentedMasked(branchDl);
+            fprintf(stderr, "[RT64-GEOM][BRANCHZ] #%u seg=0x%08X phys=0x%08X vtx=%u screenZ=%g cmp=%g force=%u taken=%u\n",
+                branchZTraceCount + 1, branchDl, targetAddress, vtxIndex, screenZ, zValueFloat, forceBranch ? 1U : 0U, taken ? 1U : 0U);
+        }
+        else if (branchZTraceCount == 256) {
+            fprintf(stderr, "[RT64-GEOM][BRANCHZ] trace limit reached; suppressing further branchZ logs\n");
+        }
+        branchZTraceCount++;
+#endif
+        if (taken) {
             const uint32_t rdramAddress = fromSegmentedMasked(branchDl);
             *dl = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress)) - 1;
         }
@@ -954,7 +1083,20 @@ namespace RT64 {
         const Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
         const uint32_t globalIndex = indices[vtxIndex];
         const float posW = workload.drawData.posTransformed[globalIndex][3];
-        if (forceBranch || (posW < static_cast<float>(wValue))) {
+        const bool taken = forceBranch || (posW < static_cast<float>(wValue));
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+        static uint32_t branchWTraceCount = 0;
+        if (branchWTraceCount < 256) {
+            const uint32_t targetAddress = fromSegmentedMasked(branchDl);
+            fprintf(stderr, "[RT64-GEOM][BRANCHW] #%u seg=0x%08X phys=0x%08X vtx=%u posW=%g cmp=%u force=%u taken=%u\n",
+                branchWTraceCount + 1, branchDl, targetAddress, vtxIndex, posW, wValue, forceBranch ? 1U : 0U, taken ? 1U : 0U);
+        }
+        else if (branchWTraceCount == 256) {
+            fprintf(stderr, "[RT64-GEOM][BRANCHW] trace limit reached; suppressing further branchW logs\n");
+        }
+        branchWTraceCount++;
+#endif
+        if (taken) {
             const uint32_t rdramAddress = fromSegmentedMasked(branchDl);
             *dl = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress)) - 1;
         }
@@ -1034,6 +1176,9 @@ namespace RT64 {
         const uint32_t rdramAddress = fromSegmentedMasked(address);
         const uint8_t *data = reinterpret_cast<const uint8_t *>(state->fromRDRAM(rdramAddress));
         memcpy(&lights[index], data, sizeof(Light));
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+        lodTraceLightLoad(index, address, rdramAddress, lights[index]);
+#endif
         lightsChanged = true;
     }
 
