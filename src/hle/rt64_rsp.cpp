@@ -79,16 +79,18 @@ namespace RT64 {
         float maxValue = 0.0f;
         const bool suspicious = lodTraceFloatMatrixSuspicious(matrix, minValue, maxValue);
         const bool overlay = lodTraceIsOverlayAddress(segmentedAddress) || lodTraceIsOverlayAddress(rdramAddress);
-        if ((suspicious || overlay) && (matrixTraceCount < 256)) {
-            fprintf(stderr,
-                "[RT64-GEOM][MTX] #%u kind=%s seg=0x%08X phys=0x%08X params=0x%02X min=%g max=%g row3=(%g,%g,%g,%g)%s\n",
-                matrixTraceCount + 1, kind, segmentedAddress, rdramAddress, params, minValue, maxValue,
-                matrix[3][0], matrix[3][1], matrix[3][2], matrix[3][3], suspicious ? " SUSPICIOUS" : "");
+        if (suspicious || overlay) {
+            if (matrixTraceCount < 256) {
+                fprintf(stderr,
+                    "[RT64-GEOM][MTX] #%u kind=%s seg=0x%08X phys=0x%08X params=0x%02X min=%g max=%g row3=(%g,%g,%g,%g)%s\n",
+                    matrixTraceCount + 1, kind, segmentedAddress, rdramAddress, params, minValue, maxValue,
+                    matrix[3][0], matrix[3][1], matrix[3][2], matrix[3][3], suspicious ? " SUSPICIOUS" : "");
+            }
+            else if (matrixTraceCount == 256) {
+                fprintf(stderr, "[RT64-GEOM][MTX] trace limit reached; suppressing further matrix logs\n");
+            }
+            matrixTraceCount++;
         }
-        else if (matrixTraceCount == 256) {
-            fprintf(stderr, "[RT64-GEOM][MTX] trace limit reached; suppressing further matrix logs\n");
-        }
-        matrixTraceCount++;
     }
 
     static void lodTraceVertexLoad(const char *kind, uint32_t segmentedAddress, uint32_t rdramAddress, uint32_t vtxCount, uint32_t dstIndex, const RSP::Vertex *vertices) {
@@ -111,18 +113,20 @@ namespace RT64 {
         }
 
         const bool overlay = lodTraceIsOverlayAddress(segmentedAddress) || lodTraceIsOverlayAddress(rdramAddress);
-        if ((suspicious || overlay) && (vertexTraceCount < 512)) {
-            const RSP::Vertex &v0 = vertices[0];
-            fprintf(stderr,
-                "[RT64-GEOM][VTX] #%u kind=%s seg=0x%08X phys=0x%08X count=%u dst=%u min=(%d,%d,%d) max=(%d,%d,%d) v0=(%d,%d,%d) rgba=(%u,%u,%u,%u)%s\n",
-                vertexTraceCount + 1, kind, segmentedAddress, rdramAddress, vtxCount, dstIndex,
-                minX, minY, minZ, maxX, maxY, maxZ, v0.x, v0.y, v0.z,
-                v0.color.r, v0.color.g, v0.color.b, v0.color.a, suspicious ? " SUSPICIOUS" : "");
+        if (suspicious || overlay) {
+            if (vertexTraceCount < 512) {
+                const RSP::Vertex v0 = (vtxCount > 0) ? vertices[0] : RSP::Vertex{};
+                fprintf(stderr,
+                    "[RT64-GEOM][VTX] #%u kind=%s seg=0x%08X phys=0x%08X count=%u dst=%u min=(%d,%d,%d) max=(%d,%d,%d) v0=(%d,%d,%d) rgba=(%u,%u,%u,%u)%s\n",
+                    vertexTraceCount + 1, kind, segmentedAddress, rdramAddress, vtxCount, dstIndex,
+                    minX, minY, minZ, maxX, maxY, maxZ, v0.x, v0.y, v0.z,
+                    v0.color.r, v0.color.g, v0.color.b, v0.color.a, suspicious ? " SUSPICIOUS" : "");
+            }
+            else if (vertexTraceCount == 512) {
+                fprintf(stderr, "[RT64-GEOM][VTX] trace limit reached; suppressing further vertex logs\n");
+            }
+            vertexTraceCount++;
         }
-        else if (vertexTraceCount == 512) {
-            fprintf(stderr, "[RT64-GEOM][VTX] trace limit reached; suppressing further vertex logs\n");
-        }
-        vertexTraceCount++;
     }
 
     static void lodTraceLightLoad(uint8_t index, uint32_t segmentedAddress, uint32_t rdramAddress, const RSP::Light &light) {
@@ -130,17 +134,19 @@ namespace RT64 {
         const bool black = (light.dir.colr == 0) && (light.dir.colg == 0) && (light.dir.colb == 0) &&
             (light.dir.colcr == 0) && (light.dir.colcg == 0) && (light.dir.colcb == 0);
         const bool overlay = lodTraceIsOverlayAddress(segmentedAddress) || lodTraceIsOverlayAddress(rdramAddress);
-        if ((black || overlay) && (lightTraceCount < 256)) {
-            fprintf(stderr,
-                "[RT64-GEOM][LIGHT] #%u idx=%u seg=0x%08X phys=0x%08X col=(%u,%u,%u) colc=(%u,%u,%u) dir=(%d,%d,%d)%s\n",
-                lightTraceCount + 1, index, segmentedAddress, rdramAddress,
-                light.dir.colr, light.dir.colg, light.dir.colb, light.dir.colcr, light.dir.colcg, light.dir.colcb,
-                light.dir.dirx, light.dir.diry, light.dir.dirz, black ? " BLACK" : "");
+        if (black || overlay) {
+            if (lightTraceCount < 256) {
+                fprintf(stderr,
+                    "[RT64-GEOM][LIGHT] #%u idx=%u seg=0x%08X phys=0x%08X col=(%u,%u,%u) colc=(%u,%u,%u) dir=(%d,%d,%d)%s\n",
+                    lightTraceCount + 1, index, segmentedAddress, rdramAddress,
+                    light.dir.colr, light.dir.colg, light.dir.colb, light.dir.colcr, light.dir.colcg, light.dir.colcb,
+                    light.dir.dirx, light.dir.diry, light.dir.dirz, black ? " BLACK" : "");
+            }
+            else if (lightTraceCount == 256) {
+                fprintf(stderr, "[RT64-GEOM][LIGHT] trace limit reached; suppressing further light logs\n");
+            }
+            lightTraceCount++;
         }
-        else if (lightTraceCount == 256) {
-            fprintf(stderr, "[RT64-GEOM][LIGHT] trace limit reached; suppressing further light logs\n");
-        }
-        lightTraceCount++;
     }
 #endif
 

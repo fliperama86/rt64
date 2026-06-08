@@ -46,23 +46,25 @@ namespace RT64 {
         static void lodTraceRunDl(State *state, const DisplayList *caller, uint32_t segmentedAddress, uint32_t rdramAddress, const DisplayList *target, bool invalid, bool empty, uint8_t firstOpcode) {
             static uint32_t runDlTraceCount = 0;
             const bool overlay = lodTraceIsOverlayAddress(segmentedAddress) || lodTraceIsOverlayAddress(rdramAddress);
-            if ((invalid || overlay) && (runDlTraceCount < 512)) {
-                const uint32_t callerOffset = lodTraceDisplayListPointerOffset(state, caller);
-                fprintf(stderr,
-                    "[RT64-GEOM][DL] #%u caller=0x%08X src=0x%08X phys=0x%08X op=0x%02X w0=0x%08X w1=0x%08X empty=%u invalid=%u\n",
-                    runDlTraceCount + 1, callerOffset, segmentedAddress, rdramAddress, firstOpcode,
-                    target->w0, target->w1, empty ? 1U : 0U, invalid ? 1U : 0U);
-                if (invalid && !empty) {
-                    for (uint32_t i = 0; i < 8; i++) {
-                        fprintf(stderr, "[RT64-GEOM][DL-DUMP] #%u +%02u w0=0x%08X w1=0x%08X\n",
-                            runDlTraceCount + 1, i, target[i].w0, target[i].w1);
+            if (invalid || overlay) {
+                if (runDlTraceCount < 512) {
+                    const uint32_t callerOffset = lodTraceDisplayListPointerOffset(state, caller);
+                    fprintf(stderr,
+                        "[RT64-GEOM][DL] #%u caller=0x%08X src=0x%08X phys=0x%08X op=0x%02X w0=0x%08X w1=0x%08X empty=%u invalid=%u\n",
+                        runDlTraceCount + 1, callerOffset, segmentedAddress, rdramAddress, firstOpcode,
+                        target->w0, target->w1, empty ? 1U : 0U, invalid ? 1U : 0U);
+                    if (invalid && !empty) {
+                        for (uint32_t i = 0; i < 8; i++) {
+                            fprintf(stderr, "[RT64-GEOM][DL-DUMP] #%u +%02u w0=0x%08X w1=0x%08X\n",
+                                runDlTraceCount + 1, i, target[i].w0, target[i].w1);
+                        }
                     }
                 }
+                else if (runDlTraceCount == 512) {
+                    fprintf(stderr, "[RT64-GEOM][DL] trace limit reached; suppressing further display-list logs\n");
+                }
+                runDlTraceCount++;
             }
-            else if (runDlTraceCount == 512) {
-                fprintf(stderr, "[RT64-GEOM][DL] trace limit reached; suppressing further display-list logs\n");
-            }
-            runDlTraceCount++;
         }
 #endif
 
