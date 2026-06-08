@@ -51,9 +51,34 @@ namespace RT64 {
     constexpr float DepthRange = 1024.0f;
 
 #if LOD_ENABLE_RENDER_GEOM_TRACE
+    static uint32_t lodTraceVertexSlotSegmented[RSP_MAX_VERTICES] = {};
+    static uint32_t lodTraceVertexSlotPhysical[RSP_MAX_VERTICES] = {};
+    static uint32_t lodTraceVertexSlotSourceIndex[RSP_MAX_VERTICES] = {};
+    static uint32_t lodTraceVertexSlotSerial[RSP_MAX_VERTICES] = {};
+    static uint32_t lodTraceVertexLoadSerial = 0;
+
     static bool lodTraceIsOverlayAddress(uint32_t address) {
         const uint32_t hi = (address >> 24) & 0xFFU;
         return (hi == 0x0E) || (hi == 0x0F) || (hi == 0x8E) || (hi == 0x8F);
+    }
+
+    static bool lodTraceVertexCoordSuspicious(const RSP::Vertex &v) {
+        return (std::abs(int(v.x)) > 20000) || (std::abs(int(v.y)) > 20000) || (std::abs(int(v.z)) > 20000);
+    }
+
+    static void lodTraceRememberVertexSlots(uint32_t segmentedAddress, uint32_t rdramAddress, uint32_t vtxCount, uint32_t dstIndex) {
+        const uint32_t serial = ++lodTraceVertexLoadSerial;
+        for (uint32_t i = 0; i < vtxCount; i++) {
+            const uint32_t slot = dstIndex + i;
+            if (slot >= RSP_MAX_VERTICES) {
+                break;
+            }
+
+            lodTraceVertexSlotSegmented[slot] = segmentedAddress;
+            lodTraceVertexSlotPhysical[slot] = rdramAddress + (i * sizeof(RSP::Vertex));
+            lodTraceVertexSlotSourceIndex[slot] = i;
+            lodTraceVertexSlotSerial[slot] = serial;
+        }
     }
 
     static bool lodTraceFloatMatrixSuspicious(const hlslpp::float4x4 &matrix, float &minValue, float &maxValue) {
@@ -96,6 +121,7 @@ namespace RT64 {
     static void lodTraceVertexLoad(const char *kind, uint32_t segmentedAddress, uint32_t rdramAddress, uint32_t vtxCount, uint32_t dstIndex, const RSP::Vertex *vertices) {
         static uint32_t vertexTraceCount = 0;
         int16_t minX = 0, minY = 0, minZ = 0, maxX = 0, maxY = 0, maxZ = 0;
+        uint32_t minXIndex = 0, minYIndex = 0, minZIndex = 0, maxXIndex = 0, maxYIndex = 0, maxZIndex = 0;
         bool suspicious = (vtxCount == 0) || (vtxCount > 64);
         if (vtxCount > 0) {
             minX = maxX = vertices[0].x;
@@ -103,10 +129,13 @@ namespace RT64 {
             minZ = maxZ = vertices[0].z;
             for (uint32_t i = 0; i < vtxCount; i++) {
                 const RSP::Vertex &v = vertices[i];
-                minX = std::min(minX, v.x); maxX = std::max(maxX, v.x);
-                minY = std::min(minY, v.y); maxY = std::max(maxY, v.y);
-                minZ = std::min(minZ, v.z); maxZ = std::max(maxZ, v.z);
-                if ((std::abs(int(v.x)) > 20000) || (std::abs(int(v.y)) > 20000) || (std::abs(int(v.z)) > 20000)) {
+                if (v.x < minX) { minX = v.x; minXIndex = i; }
+                if (v.x > maxX) { maxX = v.x; maxXIndex = i; }
+                if (v.y < minY) { minY = v.y; minYIndex = i; }
+                if (v.y > maxY) { maxY = v.y; maxYIndex = i; }
+                if (v.z < minZ) { minZ = v.z; minZIndex = i; }
+                if (v.z > maxZ) { maxZ = v.z; maxZIndex = i; }
+                if (lodTraceVertexCoordSuspicious(v)) {
                     suspicious = true;
                 }
             }
@@ -117,10 +146,33 @@ namespace RT64 {
             if (vertexTraceCount < 512) {
                 const RSP::Vertex v0 = (vtxCount > 0) ? vertices[0] : RSP::Vertex{};
                 fprintf(stderr,
-                    "[RT64-GEOM][VTX] #%u kind=%s seg=0x%08X phys=0x%08X count=%u dst=%u min=(%d,%d,%d) max=(%d,%d,%d) v0=(%d,%d,%d) rgba=(%u,%u,%u,%u)%s\n",
+                    "[RT64-GEOM][VTX] #%u kind=%s seg=0x%08X phys=0x%08X count=%u dst=%u min=(%d@+%u,%d@+%u,%d@+%u) max=(%d@+%u,%d@+%u,%d@+%u) v0=(%d,%d,%d) rgba=(%u,%u,%u,%u)%s\n",
                     vertexTraceCount + 1, kind, segmentedAddress, rdramAddress, vtxCount, dstIndex,
-                    minX, minY, minZ, maxX, maxY, maxZ, v0.x, v0.y, v0.z,
+                    minX, minXIndex, minY, minYIndex, minZ, minZIndex,
+                    maxX, maxXIndex, maxY, maxYIndex, maxZ, maxZIndex, v0.x, v0.y, v0.z,
                     v0.color.r, v0.color.g, v0.color.b, v0.color.a, suspicious ? " SUSPICIOUS" : "");
+
+                const uint32_t extremeIndices[6] = { minXIndex, minYIndex, minZIndex, maxXIndex, maxYIndex, maxZIndex };
+                for (uint32_t e = 0; e < 6; e++) {
+                    const uint32_t i = extremeIndices[e];
+                    bool alreadyDumped = false;
+                    for (uint32_t p = 0; p < e; p++) {
+                        if (extremeIndices[p] == i) {
+                            alreadyDumped = true;
+                            break;
+                        }
+                    }
+
+                    if (!alreadyDumped && (i < vtxCount)) {
+                        const RSP::Vertex &v = vertices[i];
+                        fprintf(stderr,
+                            "[RT64-GEOM][VTX-EXTREME] #%u +%u slot=%u xyz=(%d,%d,%d) st=(%d,%d) rgba=(%u,%u,%u,%u) normal=(%d,%d,%d,%d)%s\n",
+                            vertexTraceCount + 1, i, dstIndex + i, v.x, v.y, v.z, v.s, v.t,
+                            v.color.r, v.color.g, v.color.b, v.color.a,
+                            v.normal.x, v.normal.y, v.normal.z, v.normal.a,
+                            lodTraceVertexCoordSuspicious(v) ? " SUSPICIOUS" : "");
+                    }
+                }
             }
             else if (vertexTraceCount == 512) {
                 fprintf(stderr, "[RT64-GEOM][VTX] trace limit reached; suppressing further vertex logs\n");
@@ -592,6 +644,7 @@ namespace RT64 {
         const Vertex *dlVerts = reinterpret_cast<const Vertex *>(state->fromRDRAM(rdramAddress));
 #if LOD_ENABLE_RENDER_GEOM_TRACE
         lodTraceVertexLoad("std", address, rdramAddress, vtxCount, dstIndex, dlVerts);
+        lodTraceRememberVertexSlots(address, rdramAddress, vtxCount, dstIndex);
 #endif
         memcpy(&vertices[dstIndex], dlVerts, sizeof(Vertex) * vtxCount);
         setVertexCommon<true, sizeof(Vertex)>(rdramAddress, dstIndex, dstIndex + vtxCount);
@@ -621,6 +674,7 @@ namespace RT64 {
         }
 #if LOD_ENABLE_RENDER_GEOM_TRACE
         lodTraceVertexLoad("pd", address, rdramAddress, vtxCount, dstIndex, &vertices[dstIndex]);
+        lodTraceRememberVertexSlots(address, rdramAddress, vtxCount, dstIndex);
 #endif
 
         setVertexCommon<true, sizeof(VertexPD)>(rdramAddress, dstIndex, dstIndex + vtxCount);
@@ -649,6 +703,7 @@ namespace RT64 {
         }
 #if LOD_ENABLE_RENDER_GEOM_TRACE
         lodTraceVertexLoad("exv1", address, rdramAddress, vtxCount, dstIndex, &vertices[dstIndex]);
+        lodTraceRememberVertexSlots(address, rdramAddress, vtxCount, dstIndex);
 #endif
 
         setVertexCommon<false, sizeof(VertexEXV1)>(rdramAddress, dstIndex, dstIndex + vtxCount);
@@ -1368,6 +1423,34 @@ namespace RT64 {
             globalIndices[2] = indices[c];
             used[a] = used[b] = used[c] = true;
         }
+
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+        if (!rawGlobalIndices) {
+            static uint32_t suspiciousTriTraceCount = 0;
+            const bool localValid = (a < RSP_MAX_VERTICES) && (b < RSP_MAX_VERTICES) && (c < RSP_MAX_VERTICES);
+            const bool suspiciousTri = localValid && (lodTraceVertexCoordSuspicious(vertices[a]) ||
+                lodTraceVertexCoordSuspicious(vertices[b]) || lodTraceVertexCoordSuspicious(vertices[c]));
+            if (suspiciousTri) {
+                if (suspiciousTriTraceCount < 512) {
+                    const RSP::Vertex &va = vertices[a];
+                    const RSP::Vertex &vb = vertices[b];
+                    const RSP::Vertex &vc = vertices[c];
+                    fprintf(stderr,
+                        "[RT64-GEOM][TRI-SUSPICIOUS] #%u local=(%u,%u,%u) global=(%u,%u,%u) xyzA=(%d,%d,%d) xyzB=(%d,%d,%d) xyzC=(%d,%d,%d) srcA=0x%08X/+%u/L%u srcB=0x%08X/+%u/L%u srcC=0x%08X/+%u/L%u geom=0x%08X xform=%u vp=%u\n",
+                        suspiciousTriTraceCount + 1, a, b, c, globalIndices[0], globalIndices[1], globalIndices[2],
+                        va.x, va.y, va.z, vb.x, vb.y, vb.z, vc.x, vc.y, vc.z,
+                        lodTraceVertexSlotPhysical[a], lodTraceVertexSlotSourceIndex[a], lodTraceVertexSlotSerial[a],
+                        lodTraceVertexSlotPhysical[b], lodTraceVertexSlotSourceIndex[b], lodTraceVertexSlotSerial[b],
+                        lodTraceVertexSlotPhysical[c], lodTraceVertexSlotSourceIndex[c], lodTraceVertexSlotSerial[c],
+                        geometryMode, curTransformIndex, curViewProjIndex);
+                }
+                else if (suspiciousTriTraceCount == 512) {
+                    fprintf(stderr, "[RT64-GEOM][TRI-SUSPICIOUS] trace limit reached; suppressing further suspicious triangle logs\n");
+                }
+                suspiciousTriTraceCount++;
+            }
+        }
+#endif
 
         // Indicates the vertex has been used in a tri. Whatever routines modify the vertex afterwards must use a new index instead.
 

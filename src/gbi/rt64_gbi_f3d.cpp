@@ -91,6 +91,7 @@ namespace RT64 {
             const RSP::VertexPD *pdVertices = reinterpret_cast<const RSP::VertexPD *>(vertexBytes);
             bool suspicious = (vtxCount == 0) || (vtxCount > 64);
             int16_t minX = 0, minY = 0, minZ = 0, maxX = 0, maxY = 0, maxZ = 0;
+            uint32_t minXIndex = 0, minYIndex = 0, minZIndex = 0, maxXIndex = 0, maxYIndex = 0, maxZIndex = 0;
             if (vtxCount > 0) {
                 if (physicalDataFormat) {
                     minX = maxX = pdVertices[0].x;
@@ -98,9 +99,12 @@ namespace RT64 {
                     minZ = maxZ = pdVertices[0].z;
                     for (uint32_t i = 0; i < vtxCount; i++) {
                         const RSP::VertexPD &v = pdVertices[i];
-                        minX = std::min(minX, v.x); maxX = std::max(maxX, v.x);
-                        minY = std::min(minY, v.y); maxY = std::max(maxY, v.y);
-                        minZ = std::min(minZ, v.z); maxZ = std::max(maxZ, v.z);
+                        if (v.x < minX) { minX = v.x; minXIndex = i; }
+                        if (v.x > maxX) { maxX = v.x; maxXIndex = i; }
+                        if (v.y < minY) { minY = v.y; minYIndex = i; }
+                        if (v.y > maxY) { maxY = v.y; maxYIndex = i; }
+                        if (v.z < minZ) { minZ = v.z; minZIndex = i; }
+                        if (v.z > maxZ) { maxZ = v.z; maxZIndex = i; }
                         if ((std::abs(int(v.x)) > 20000) || (std::abs(int(v.y)) > 20000) || (std::abs(int(v.z)) > 20000)) {
                             suspicious = true;
                         }
@@ -112,9 +116,12 @@ namespace RT64 {
                     minZ = maxZ = vertices[0].z;
                     for (uint32_t i = 0; i < vtxCount; i++) {
                         const RSP::Vertex &v = vertices[i];
-                        minX = std::min(minX, v.x); maxX = std::max(maxX, v.x);
-                        minY = std::min(minY, v.y); maxY = std::max(maxY, v.y);
-                        minZ = std::min(minZ, v.z); maxZ = std::max(maxZ, v.z);
+                        if (v.x < minX) { minX = v.x; minXIndex = i; }
+                        if (v.x > maxX) { maxX = v.x; maxXIndex = i; }
+                        if (v.y < minY) { minY = v.y; minYIndex = i; }
+                        if (v.y > maxY) { maxY = v.y; maxYIndex = i; }
+                        if (v.z < minZ) { minZ = v.z; minZIndex = i; }
+                        if (v.z > maxZ) { maxZ = v.z; maxZIndex = i; }
                         if ((std::abs(int(v.x)) > 20000) || (std::abs(int(v.y)) > 20000) || (std::abs(int(v.z)) > 20000)) {
                             suspicious = true;
                         }
@@ -137,9 +144,11 @@ namespace RT64 {
                 const uint32_t waveCount = dl->p0(9, 7);
                 const uint32_t waveDst = dl->p0(16, 8) / 5;
                 fprintf(stderr,
-                    "[RT64-GEOM][VTXCMD] #%u decoder=%s caller=0x%08X w0=0x%08X w1=0x%08X seg=0x%08X phys=0x%08X count=%u dst=%u min=(%d,%d,%d) max=(%d,%d,%d) alt_f3d=(%u,%u) alt_f3dex=(%u,%u) alt_f3dex2=(%u,%u) alt_wave=(%u,%u)%s\n",
+                    "[RT64-GEOM][VTXCMD] #%u decoder=%s caller=0x%08X w0=0x%08X w1=0x%08X seg=0x%08X phys=0x%08X count=%u dst=%u min=(%d@+%u,%d@+%u,%d@+%u) max=(%d@+%u,%d@+%u,%d@+%u) alt_f3d=(%u,%u) alt_f3dex=(%u,%u) alt_f3dex2=(%u,%u) alt_wave=(%u,%u)%s\n",
                     vertexCommandTraceCount + 1, decoder, callerOffset, dl->w0, dl->w1, address, rdramAddress, vtxCount, dstIndex,
-                    minX, minY, minZ, maxX, maxY, maxZ, f3dCount, f3dDst, f3dexCount, f3dexDst, f3dex2Count, f3dex2Dst, waveCount, waveDst,
+                    minX, minXIndex, minY, minYIndex, minZ, minZIndex,
+                    maxX, maxXIndex, maxY, maxYIndex, maxZ, maxZIndex,
+                    f3dCount, f3dDst, f3dexCount, f3dexDst, f3dex2Count, f3dex2Dst, waveCount, waveDst,
                     physicalDataFormat ? " PD" : "");
                 const uint32_t dumpCount = std::min<uint32_t>(vtxCount, 4);
                 for (uint32_t i = 0; i < dumpCount; i++) {
@@ -161,6 +170,42 @@ namespace RT64 {
                             "[RT64-GEOM][VTXRAW] #%u +%u raw=(0x%08X,0x%08X,0x%08X,0x%08X) xyz=(%d,%d,%d) st=(%d,%d) rgba=(%u,%u,%u,%u) normal=(%d,%d,%d,%d)\n",
                             vertexCommandTraceCount + 1, i, rw0, rw1, rw2, rw3, v.x, v.y, v.z, v.s, v.t,
                             v.color.r, v.color.g, v.color.b, v.color.a, v.normal.x, v.normal.y, v.normal.z, v.normal.a);
+                    }
+                }
+
+                const uint32_t extremeIndices[6] = { minXIndex, minYIndex, minZIndex, maxXIndex, maxYIndex, maxZIndex };
+                for (uint32_t e = 0; e < 6; e++) {
+                    const uint32_t i = extremeIndices[e];
+                    bool alreadyDumped = (i < dumpCount);
+                    for (uint32_t p = 0; p < e; p++) {
+                        if (extremeIndices[p] == i) {
+                            alreadyDumped = true;
+                            break;
+                        }
+                    }
+
+                    if (!alreadyDumped && (i < vtxCount)) {
+                        if (physicalDataFormat) {
+                            const RSP::VertexPD &v = pdVertices[i];
+                            uint32_t rw0 = 0, rw1 = 0, rw2 = 0;
+                            std::memcpy(&rw0, reinterpret_cast<const uint8_t *>(&pdVertices[i]) + 0, sizeof(uint32_t));
+                            std::memcpy(&rw1, reinterpret_cast<const uint8_t *>(&pdVertices[i]) + 4, sizeof(uint32_t));
+                            std::memcpy(&rw2, reinterpret_cast<const uint8_t *>(&pdVertices[i]) + 8, sizeof(uint32_t));
+                            fprintf(stderr,
+                                "[RT64-GEOM][VTXRAW-EXTREME] #%u +%u slot=%u raw_pd=(0x%08X,0x%08X,0x%08X) xyz=(%d,%d,%d) st=(%d,%d) ci=%u%s\n",
+                                vertexCommandTraceCount + 1, i, dstIndex + i, rw0, rw1, rw2, v.x, v.y, v.z, v.s, v.t, v.ci,
+                                ((std::abs(int(v.x)) > 20000) || (std::abs(int(v.y)) > 20000) || (std::abs(int(v.z)) > 20000)) ? " SUSPICIOUS" : "");
+                        }
+                        else {
+                            const RSP::Vertex &v = vertices[i];
+                            uint32_t rw0 = 0, rw1 = 0, rw2 = 0, rw3 = 0;
+                            lodTraceReadVertexWords(&vertices[i], rw0, rw1, rw2, rw3);
+                            fprintf(stderr,
+                                "[RT64-GEOM][VTXRAW-EXTREME] #%u +%u slot=%u raw=(0x%08X,0x%08X,0x%08X,0x%08X) xyz=(%d,%d,%d) st=(%d,%d) rgba=(%u,%u,%u,%u) normal=(%d,%d,%d,%d)%s\n",
+                                vertexCommandTraceCount + 1, i, dstIndex + i, rw0, rw1, rw2, rw3, v.x, v.y, v.z, v.s, v.t,
+                                v.color.r, v.color.g, v.color.b, v.color.a, v.normal.x, v.normal.y, v.normal.z, v.normal.a,
+                                ((std::abs(int(v.x)) > 20000) || (std::abs(int(v.y)) > 20000) || (std::abs(int(v.z)) > 20000)) ? " SUSPICIOUS" : "");
+                        }
                     }
                 }
             }
