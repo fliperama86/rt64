@@ -22,6 +22,10 @@
 
 #define GBI_UNKNOWN_HASH_NUMB 0xFFFFFFFFFFFFFFFFULL
 
+#ifndef LOD_ENABLE_GBI_MISS_TRACE
+#define LOD_ENABLE_GBI_MISS_TRACE 0
+#endif
+
 namespace RT64 {
     // DisplayList
 
@@ -402,6 +406,11 @@ namespace RT64 {
         uint64_t rdramHash = 0;
         XXH3_state_t xxh3;
         XXH3_64bits_reset(&xxh3);
+#if LOD_ENABLE_GBI_MISS_TRACE
+        std::vector<std::pair<uint32_t, uint64_t>> textHashTrace;
+        std::vector<std::pair<uint32_t, uint64_t>> dataHashTrace;
+        std::vector<std::pair<uint32_t, uint64_t>> *activeHashTrace = &textHashTrace;
+#endif
 
         auto hashSegment = [&](uint32_t index, const GBISegment &gbiSegment, int32_t &resultIndex) {
             if (gbiSegment.hashLength > rdramHashed) {
@@ -410,6 +419,12 @@ namespace RT64 {
                 rdramHash = XXH3_64bits_digest(&xxh3);
                 rdramCursor += rdramToHash;
                 rdramHashed += rdramToHash;
+#if LOD_ENABLE_GBI_MISS_TRACE
+                if (activeHashTrace != nullptr &&
+                    (activeHashTrace->empty() || activeHashTrace->back().first != rdramHashed)) {
+                    activeHashTrace->push_back({ rdramHashed, rdramHash });
+                }
+#endif
             }
 
             if (rdramHash == gbiSegment.hashValue) {
@@ -431,12 +446,36 @@ namespace RT64 {
         rdramCursor = &RDRAM[dataAddress];
         rdramHashed = 0;
         rdramHash = 0;
+#if LOD_ENABLE_GBI_MISS_TRACE
+        activeHashTrace = &dataHashTrace;
+#endif
         for (uint32_t i = 0; i < dataSegments.size(); i++) {
             hashSegment(i, dataSegments[i], dataSegmentIndex);
         }
 
         if (textSegmentIndex < 0 || dataSegmentIndex < 0) {
             fprintf(stderr, "Unable to find a matching GBI in the current database. This game is not supported in HLE.\n");
+#if LOD_ENABLE_GBI_MISS_TRACE
+            static uint32_t gbi_miss_count = 0;
+            gbi_miss_count++;
+            if (gbi_miss_count <= 16 || (gbi_miss_count % 100) == 0) {
+                fprintf(stderr,
+                        "[GBI_MISS_HASH] #%u text=0x%08X match=%d data=0x%08X match=%d\n",
+                        gbi_miss_count, textAddress, textSegmentIndex, dataAddress, dataSegmentIndex);
+
+                fprintf(stderr, "[GBI_MISS_HASH] text lengths/hashes:");
+                for (const auto &[length, hash] : textHashTrace) {
+                    fprintf(stderr, " 0x%X=0x%016" PRIX64, length, hash);
+                }
+                fprintf(stderr, "\n");
+
+                fprintf(stderr, "[GBI_MISS_HASH] data lengths/hashes:");
+                for (const auto &[length, hash] : dataHashTrace) {
+                    fprintf(stderr, " 0x%X=0x%016" PRIX64, length, hash);
+                }
+                fprintf(stderr, "\n");
+            }
+#endif
             deduceGBIInformation(RDRAM, textAddress, dataAddress);
             return nullptr;
         }

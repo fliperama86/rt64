@@ -4,11 +4,26 @@
 
 #include "rt64_gbi_f3dex.h"
 
+#include <cstdint>
+#include <cstdio>
+
 #include "hle/rt64_interpreter.h"
 
 #include "rt64_gbi_extended.h"
 #include "rt64_gbi_f3d.h"
 #include "rt64_gbi_rdp.h"
+
+#ifndef LOD_ENABLE_GBI_MISS_TRACE
+#define LOD_ENABLE_GBI_MISS_TRACE 0
+#endif
+
+#ifndef LOD_FIX_INVALID_GBI_LOAD_UCODE
+#define LOD_FIX_INVALID_GBI_LOAD_UCODE 0
+#endif
+
+#ifndef LOD_FIX_INVALID_GBI_LOAD_UCODE_END_DL
+#define LOD_FIX_INVALID_GBI_LOAD_UCODE_END_DL 0
+#endif
 
 namespace RT64 {
     namespace GBI_F3DEX {
@@ -50,6 +65,48 @@ namespace RT64 {
         }
         
         void loadUCode(State *state, DisplayList **dl) {
+#if LOD_FIX_INVALID_GBI_LOAD_UCODE
+            const uint32_t textAddress = (*dl)->w1;
+            const uint32_t dataAddress = state->microcode.half1;
+
+            // A valid F3DEX/F3DEX2/S2DEX LOAD_UCODE sequence carries the ucode data pointer
+            // in a preceding RDPHALF_1. If it is missing, preserving the current GBI is safer
+            // than clobbering the interpreter to a null/unknown GBI and dropping the rest of
+            // the display list.
+            if (dataAddress == 0) {
+#if LOD_ENABLE_GBI_MISS_TRACE
+                static uint32_t skippedInvalidLoadUCodeCount = 0;
+                skippedInvalidLoadUCodeCount++;
+                if ((skippedInvalidLoadUCodeCount <= 16) || ((skippedInvalidLoadUCodeCount % 100) == 0)) {
+                    const GBI *currentGBI = state->ext.interpreter->hleGBI;
+                    uint32_t commandAddress = 0xFFFFFFFFU;
+                    const uintptr_t dlHost = reinterpret_cast<uintptr_t>(*dl);
+                    const uintptr_t rdramHost = reinterpret_cast<uintptr_t>(state->RDRAM);
+                    if (dlHost >= rdramHost) {
+                        commandAddress = static_cast<uint32_t>(dlHost - rdramHost);
+                    }
+                    fprintf(stderr,
+#if LOD_FIX_INVALID_GBI_LOAD_UCODE_END_DL
+                        "[GBI_LOAD_UCODE_ENDDL] #%u dl=%llu start=0x%08X cmd=0x%08X w0=0x%08X text=0x%08X data=0x%08X current_ucode=%u\n",
+#else
+                        "[GBI_LOAD_UCODE_SKIP] #%u dl=%llu start=0x%08X cmd=0x%08X w0=0x%08X text=0x%08X data=0x%08X current_ucode=%u\n",
+#endif
+                        skippedInvalidLoadUCodeCount,
+                        static_cast<unsigned long long>(state->displayListCounter),
+                        state->displayListAddress,
+                        commandAddress,
+                        (*dl)->w0,
+                        textAddress,
+                        dataAddress,
+                        currentGBI != nullptr ? static_cast<unsigned>(currentGBI->ucode) : 0);
+                }
+#endif
+#if LOD_FIX_INVALID_GBI_LOAD_UCODE_END_DL
+                *dl = nullptr;
+#endif
+                return;
+            }
+#endif
             state->ext.interpreter->loadUCodeGBI((*dl)->w1, state->microcode.half1, false);
         }
 

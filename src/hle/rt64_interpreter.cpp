@@ -5,8 +5,17 @@
 #include "rt64_interpreter.h"
 
 #include <cassert>
+#include <cstdio>
 
 //#define DUMP_DISPLAY_LISTS
+
+#ifndef LOD_ENABLE_GBI_MISS_TRACE
+#define LOD_ENABLE_GBI_MISS_TRACE 0
+#endif
+
+#ifndef LOD_FIX_PRESERVE_GBI_ON_LOAD_MISS
+#define LOD_FIX_PRESERVE_GBI_ON_LOAD_MISS 0
+#endif
 
 namespace RT64 {
     static FILE *displayListFp = nullptr;
@@ -31,17 +40,43 @@ namespace RT64 {
         const uint32_t AddressMask = 0xFFFFF8;
         const uint32_t maskedTextAddress = textAddress & AddressMask;
         const uint32_t maskedDataAddress = dataAddress & AddressMask;
+        bool skipResetForPreservedMiss = false;
         if ((UCode.textAddress != maskedTextAddress) || (UCode.dataAddress != maskedDataAddress)) {
-            hleGBI = gbiManager.getGBIForUCode(state->RDRAM, maskedTextAddress, maskedDataAddress);
-            if (hleGBI != nullptr) {
-                state->rsp->setGBI(hleGBI);
+            GBI *matchedGBI = gbiManager.getGBIForUCode(state->RDRAM, maskedTextAddress, maskedDataAddress);
+#if LOD_FIX_PRESERVE_GBI_ON_LOAD_MISS
+            if ((matchedGBI == nullptr) && !resetFromTask && (hleGBI != nullptr)) {
+                skipResetForPreservedMiss = true;
+#if LOD_ENABLE_GBI_MISS_TRACE
+                static uint32_t preservedLoadMissCount = 0;
+                preservedLoadMissCount++;
+                if ((preservedLoadMissCount <= 16) || ((preservedLoadMissCount % 100) == 0)) {
+                    fprintf(stderr,
+                        "[GBI_LOAD_UCODE_PRESERVE] #%u dl=%llu start=0x%08X text=0x%08X data=0x%08X masked_text=0x%08X masked_data=0x%08X prev_ucode=%u\n",
+                        preservedLoadMissCount,
+                        static_cast<unsigned long long>(state->displayListCounter),
+                        state->displayListAddress,
+                        textAddress,
+                        dataAddress,
+                        maskedTextAddress,
+                        maskedDataAddress,
+                        static_cast<unsigned>(hleGBI->ucode));
+                }
+#endif
             }
+            else
+#endif
+            {
+                hleGBI = matchedGBI;
+                if (hleGBI != nullptr) {
+                    state->rsp->setGBI(hleGBI);
+                }
 
-            UCode.textAddress = maskedTextAddress;
-            UCode.dataAddress = maskedDataAddress;
+                UCode.textAddress = maskedTextAddress;
+                UCode.dataAddress = maskedDataAddress;
+            }
         }
 
-        if (hleGBI != nullptr) {
+        if ((hleGBI != nullptr) && !skipResetForPreservedMiss) {
             GBIReset resetFunction = resetFromTask ? hleGBI->resetFromTask : hleGBI->resetFromLoad;
             if (resetFunction != nullptr) {
                 resetFunction(state);
@@ -154,7 +189,20 @@ namespace RT64 {
     }
 
     void Interpreter::processDisplayLists(uint32_t dlStartAdddress, DisplayList *dlStart) {
+#if LOD_ENABLE_GBI_MISS_TRACE
+        if (hleGBI == nullptr) {
+            static uint32_t null_hle_skip_count = 0;
+            null_hle_skip_count++;
+            if (null_hle_skip_count <= 16 || (null_hle_skip_count % 100) == 0) {
+                fprintf(stderr,
+                        "[GBI_MISS_SKIP] #%u skipping HLE DL at 0x%08X because no matching GBI is loaded\n",
+                        null_hle_skip_count, dlStartAdddress);
+            }
+            return;
+        }
+#else
         assert(hleGBI != nullptr);
+#endif
 
         state->dlCpuProfiler.start();
 
@@ -182,6 +230,19 @@ namespace RT64 {
                 dl = nullptr; // Clean exit — don't break, let the while loop end naturally
                 continue;
             }
+#if LOD_ENABLE_GBI_MISS_TRACE
+            if (hleGBI == nullptr) {
+                static uint32_t mid_dl_null_hle_skip_count = 0;
+                mid_dl_null_hle_skip_count++;
+                if (mid_dl_null_hle_skip_count <= 16 || (mid_dl_null_hle_skip_count % 100) == 0) {
+                    fprintf(stderr,
+                            "[GBI_MISS_SKIP] mid-DL #%u at start=0x%08X cmd=%u because no matching GBI is loaded\n",
+                            mid_dl_null_hle_skip_count, dlStartAdddress, cmdCount);
+                }
+                dl = nullptr;
+                continue;
+            }
+#endif
             opCode = (dl->w0 >> 24);
 
             if ((extendedOpCode != 0) && (opCode == extendedOpCode)) {

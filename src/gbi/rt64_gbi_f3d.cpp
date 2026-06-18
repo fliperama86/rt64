@@ -17,6 +17,7 @@
 #include "rt64_f3d.h"
 #include "rt64_gbi_extended.h"
 #include "rt64_gbi_rdp.h"
+#include "hle/rt64_interpreter.h"
 
 #ifndef LOD_ENABLE_RENDER_ADDR_TRACE
 #define LOD_ENABLE_RENDER_ADDR_TRACE 0
@@ -24,6 +25,26 @@
 
 #ifndef LOD_ENABLE_RENDER_GEOM_TRACE
 #define LOD_ENABLE_RENDER_GEOM_TRACE 0
+#endif
+
+#ifndef LOD_ENABLE_GBI_MISS_TRACE
+#define LOD_ENABLE_GBI_MISS_TRACE 0
+#endif
+
+#ifndef LOD_ENABLE_RUN_DL_SUSPICIOUS_TRACE
+#define LOD_ENABLE_RUN_DL_SUSPICIOUS_TRACE 0
+#endif
+
+#ifndef LOD_FIX_RUN_DL_USE_GBI_MAP
+#define LOD_FIX_RUN_DL_USE_GBI_MAP 0
+#endif
+
+#ifndef LOD_FIX_RUN_DL_NI_BOUNDS
+#define LOD_FIX_RUN_DL_NI_BOUNDS 0
+#endif
+
+#if LOD_FIX_RUN_DL_NI_BOUNDS
+extern "C" uint32_t ni_overlay_loaded_span(uint32_t vram);
 #endif
 
 namespace RT64 {
@@ -295,6 +316,70 @@ namespace RT64 {
         }
 #endif
 
+#if LOD_ENABLE_RUN_DL_SUSPICIOUS_TRACE && !LOD_ENABLE_RENDER_GEOM_TRACE
+        static uint32_t lodTraceDisplayListPointerOffset(State *state, const DisplayList *ptr) {
+            const uintptr_t base = reinterpret_cast<uintptr_t>(state->RDRAM);
+            const uintptr_t cur = reinterpret_cast<uintptr_t>(ptr);
+            if (cur >= base) {
+                const uintptr_t diff = cur - base;
+                if (diff <= 0xFFFFFFFFULL) {
+                    return static_cast<uint32_t>(diff);
+                }
+            }
+            return 0xFFFFFFFFU;
+        }
+#endif
+
+#if LOD_ENABLE_RUN_DL_SUSPICIOUS_TRACE
+        static bool lodTraceIsSuspiciousNiDlTarget(uint32_t segmentedAddress, uint32_t rdramAddress, uint8_t firstOpcode) {
+            const uint32_t segHi = (segmentedAddress >> 24) & 0xFFU;
+            const uint32_t physHi = (rdramAddress >> 24) & 0xFFU;
+            const bool niAddress = (segHi == 0x0E) || (segHi == 0x0F) || (segHi == 0x8E) || (segHi == 0x8F) ||
+                (physHi == 0x0E) || (physHi == 0x0F) || (physHi == 0x8E) || (physHi == 0x8F);
+            if (!niAddress) {
+                return false;
+            }
+
+            const uint32_t off = rdramAddress & 0x00FFFFFFU;
+            return (firstOpcode == 0xDD) ||
+                (off >= 0x0000E780U && off < 0x0000E880U) ||
+                (off >= 0x00013300U && off < 0x00013480U);
+        }
+
+        static void lodTraceSuspiciousRunDl(State *state, const DisplayList *caller, uint32_t segmentedAddress, uint32_t rdramAddress, const DisplayList *target, uint8_t firstOpcode) {
+            if (!lodTraceIsSuspiciousNiDlTarget(segmentedAddress, rdramAddress, firstOpcode)) {
+                return;
+            }
+
+            static uint32_t suspiciousRunDlTraceCount = 0;
+            suspiciousRunDlTraceCount++;
+            if (suspiciousRunDlTraceCount <= 96 || (suspiciousRunDlTraceCount % 100) == 0) {
+                const uint32_t callerOffset = lodTraceDisplayListPointerOffset(state, caller);
+                fprintf(stderr,
+                    "[GBI_RUN_DL_SUSPICIOUS] #%u dl=%llu start=0x%08X caller=0x%08X caller_w0=0x%08X caller_w1=0x%08X caller_op=0x%02X no_push_bit=%u src=0x%08X phys=0x%08X target_op=0x%02X target_w0=0x%08X target_w1=0x%08X current_ucode=%u\n",
+                    suspiciousRunDlTraceCount,
+                    static_cast<unsigned long long>(state->displayListCounter),
+                    state->displayListAddress,
+                    callerOffset,
+                    caller->w0,
+                    caller->w1,
+                    (caller->w0 >> 24) & 0xFFU,
+                    caller->p0(16, 1) ? 1U : 0U,
+                    segmentedAddress,
+                    rdramAddress,
+                    firstOpcode,
+                    target->w0,
+                    target->w1,
+                    state->ext.interpreter->hleGBI != nullptr ? static_cast<unsigned>(state->ext.interpreter->hleGBI->ucode) : 0U);
+                for (uint32_t i = 0; i < 8; i++) {
+                    fprintf(stderr,
+                        "[GBI_RUN_DL_SUSPICIOUS_DUMP] #%u +%02u w0=0x%08X w1=0x%08X\n",
+                        suspiciousRunDlTraceCount, i, target[i].w0, target[i].w1);
+                }
+            }
+        }
+#endif
+
         void matrix(State *state, DisplayList **dl) {
             state->rsp->matrix((*dl)->w1, (*dl)->p0(16, 8));
         }
@@ -357,6 +442,29 @@ namespace RT64 {
             state->rsp->setVertex((*dl)->w1, (*dl)->p0(20, 4) + 1, (*dl)->p0(16, 4));
         }
 
+#if LOD_FIX_RUN_DL_NI_BOUNDS
+        static bool lodNiExtendedDlTargetInLoadedSpan(uint32_t rdramAddress, uint32_t &vramBase, uint32_t &offset, uint32_t &span) {
+            const uint32_t hi = (rdramAddress >> 24) & 0xFF;
+            if (hi == 0x8E) {
+                vramBase = 0x0E000000U;
+                offset = rdramAddress - 0x8E000000U;
+            }
+            else if (hi == 0x8F) {
+                vramBase = 0x0F000000U;
+                offset = rdramAddress - 0x8F000000U;
+            }
+            else {
+                vramBase = 0;
+                offset = 0;
+                span = 0;
+                return false;
+            }
+
+            span = ni_overlay_loaded_span(vramBase);
+            return (span >= sizeof(DisplayList)) && (offset <= (span - sizeof(DisplayList)));
+        }
+#endif
+
         void runDl(State *state, DisplayList **dl) {
             const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
 
@@ -371,6 +479,28 @@ namespace RT64 {
                     }
                     return;
                 }
+#if LOD_FIX_RUN_DL_NI_BOUNDS
+                uint32_t niVramBase = 0;
+                uint32_t niOffset = 0;
+                uint32_t niSpan = 0;
+                if (!lodNiExtendedDlTargetInLoadedSpan(rdramAddress, niVramBase, niOffset, niSpan)) {
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+                    static uint32_t niBoundsSkipCount = 0;
+                    niBoundsSkipCount++;
+                    if ((niBoundsSkipCount <= 16) || ((niBoundsSkipCount % 100) == 0)) {
+                        fprintf(stderr,
+                            "[RT64-DL][NI_BOUNDS] skip #%u src=0x%08X phys=0x%08X vram=0x%08X off=0x%X span=0x%X\n",
+                            niBoundsSkipCount,
+                            (*dl)->w1,
+                            rdramAddress,
+                            niVramBase,
+                            niOffset,
+                            niSpan);
+                    }
+#endif
+                    return;
+                }
+#endif
             }
 
             DisplayList *target = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress));
@@ -381,8 +511,16 @@ namespace RT64 {
             // are NOT valid GBI commands. Check the first command's opcode.
             {
                 uint8_t firstOpcode = (target->w0 >> 24) & 0xFF;
+#if LOD_FIX_RUN_DL_USE_GBI_MAP
+                const GBI *activeGBI = (state->ext.interpreter != nullptr) ? state->ext.interpreter->hleGBI : nullptr;
+                bool likelyGBI = (activeGBI != nullptr) && (activeGBI->map[firstOpcode] != nullptr);
+#else
                 bool likelyGBI = (firstOpcode <= 0x0B) || (firstOpcode >= 0xB4);
+#endif
                 bool isEmpty = (target->w0 == 0 && target->w1 == 0);
+#if LOD_ENABLE_RUN_DL_SUSPICIOUS_TRACE
+                lodTraceSuspiciousRunDl(state, *dl, (*dl)->w1, rdramAddress, target, firstOpcode);
+#endif
 #if LOD_ENABLE_RENDER_GEOM_TRACE
                 lodTraceRunDl(state, *dl, (*dl)->w1, rdramAddress, target, isEmpty || !likelyGBI, isEmpty, firstOpcode);
 #endif
