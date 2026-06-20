@@ -43,8 +43,17 @@
 #define LOD_FIX_RUN_DL_NI_BOUNDS 0
 #endif
 
+#ifndef LOD_FIX_RUN_DL_STALE_NI_FALLBACK
+#define LOD_FIX_RUN_DL_STALE_NI_FALLBACK 0
+#endif
+
 #if LOD_FIX_RUN_DL_NI_BOUNDS
 extern "C" uint32_t ni_overlay_loaded_span(uint32_t vram);
+#endif
+#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
+extern "C" const void* lod_ni_stale_dl_candidate(uint8_t* rdram, uint32_t segmented_address,
+                                                  uint32_t min_size, uint32_t attempt,
+                                                  int* pair_out, uint32_t* source_out);
 #endif
 
 namespace RT64 {
@@ -442,6 +451,82 @@ namespace RT64 {
             state->rsp->setVertex((*dl)->w1, (*dl)->p0(20, 4) + 1, (*dl)->p0(16, 4));
         }
 
+
+#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
+        static bool lodRunDlOpcodeLikelyGBI(State *state, uint8_t opcode) {
+#if LOD_FIX_RUN_DL_USE_GBI_MAP
+            const GBI *activeGBI = (state->ext.interpreter != nullptr) ? state->ext.interpreter->hleGBI : nullptr;
+            return (activeGBI != nullptr) && (activeGBI->map[opcode] != nullptr);
+#else
+            return (opcode <= 0x0B) || (opcode >= 0xB4);
+#endif
+        }
+
+        static bool lodRunDlStaleCandidateLooksValid(State *state, const DisplayList *target) {
+            if (target == nullptr) {
+                return false;
+            }
+
+            for (uint32_t i = 0; i < 64; i++) {
+                const uint8_t opcode = (target[i].w0 >> 24) & 0xFF;
+                const bool empty = (target[i].w0 == 0 && target[i].w1 == 0);
+                if (empty) {
+                    return false;
+                }
+                if ((i == 0) && (opcode == 0x00)) {
+                    return false;
+                }
+                if (!lodRunDlOpcodeLikelyGBI(state, opcode)) {
+                    return false;
+                }
+                if (opcode == 0xDF) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static DisplayList *lodRunDlTryStaleNiFallback(State *state, uint32_t segmentedAddress,
+                                                       const char *reason) {
+            for (uint32_t attempt = 0; attempt < 16; attempt++) {
+                int pair = -1;
+                uint32_t source = 0;
+                const void *candidate = lod_ni_stale_dl_candidate(state->RDRAM, segmentedAddress,
+                    sizeof(DisplayList), attempt, &pair, &source);
+                if (candidate == nullptr) {
+                    return nullptr;
+                }
+
+                DisplayList *target = (DisplayList *)candidate;
+                if (!lodRunDlStaleCandidateLooksValid(state, target)) {
+                    continue;
+                }
+
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+                static uint32_t staleNiFallbackTraceCount = 0;
+                staleNiFallbackTraceCount++;
+                if ((staleNiFallbackTraceCount <= 96) || ((staleNiFallbackTraceCount % 500) == 0)) {
+                    fprintf(stderr,
+                        "[RUN_DL_STALE_NI] #%u reason=%s src=0x%08X pair=%d source=%u w0=0x%08X w1=0x%08X\n",
+                        staleNiFallbackTraceCount,
+                        reason != nullptr ? reason : "?",
+                        segmentedAddress,
+                        pair,
+                        source,
+                        target->w0,
+                        target->w1);
+                }
+#else
+                (void)reason;
+#endif
+                return target;
+            }
+
+            return nullptr;
+        }
+#endif
+
 #if LOD_FIX_RUN_DL_NI_BOUNDS
         static bool lodNiExtendedDlTargetInLoadedSpan(uint32_t rdramAddress, uint32_t &vramBase, uint32_t &offset, uint32_t &span) {
             const uint32_t hi = (rdramAddress >> 24) & 0xFF;
@@ -467,6 +552,9 @@ namespace RT64 {
 
         void runDl(State *state, DisplayList **dl) {
             const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
+#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
+            DisplayList *lodStaleNiFallbackTarget = nullptr;
+#endif
 
             // Guard: skip sub-DL if address is outside RDRAM.
             // Allow 0x8E/0x8F region (LoD NI overlay data via MEM_W).
@@ -484,6 +572,12 @@ namespace RT64 {
                 uint32_t niOffset = 0;
                 uint32_t niSpan = 0;
                 if (!lodNiExtendedDlTargetInLoadedSpan(rdramAddress, niVramBase, niOffset, niSpan)) {
+#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
+                    lodStaleNiFallbackTarget = lodRunDlTryStaleNiFallback(state, (*dl)->w1, "bounds");
+                    if (lodStaleNiFallbackTarget != nullptr) {
+                        goto lod_run_dl_have_target;
+                    }
+#endif
 #if LOD_ENABLE_RENDER_ADDR_TRACE
                     static uint32_t niBoundsSkipCount = 0;
                     niBoundsSkipCount++;
@@ -503,7 +597,14 @@ namespace RT64 {
 #endif
             }
 
+#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
+lod_run_dl_have_target:
+            DisplayList *target = (lodStaleNiFallbackTarget != nullptr)
+                ? lodStaleNiFallbackTarget
+                : reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress));
+#else
             DisplayList *target = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress));
+#endif
 
             // Guard: skip if target doesn't look like valid DL data.
             // Valid GBI opcodes for F3DEX2 are in specific ranges (0x01-0x0B, 0xB6-0xFF).
@@ -525,6 +626,17 @@ namespace RT64 {
                 lodTraceRunDl(state, *dl, (*dl)->w1, rdramAddress, target, isEmpty || !likelyGBI, isEmpty, firstOpcode);
 #endif
                 if (isEmpty || !likelyGBI) {
+#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
+                    DisplayList *guardFallback = lodRunDlTryStaleNiFallback(state, (*dl)->w1, "guard");
+                    if (guardFallback != nullptr) {
+                        target = guardFallback;
+                        firstOpcode = (target->w0 >> 24) & 0xFF;
+                        likelyGBI = lodRunDlOpcodeLikelyGBI(state, firstOpcode);
+                        isEmpty = (target->w0 == 0 && target->w1 == 0);
+                    }
+                    if (isEmpty || !likelyGBI)
+#endif
+                    {
 #if LOD_ENABLE_RENDER_ADDR_TRACE
                     static uint32_t invalidDlSkipCount = 0;
                     if (invalidDlSkipCount < 64) {
@@ -536,7 +648,8 @@ namespace RT64 {
                     }
                     invalidDlSkipCount++;
 #endif
-                    return;
+                        return;
+                    }
                 }
             }
 
