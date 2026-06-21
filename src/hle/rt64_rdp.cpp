@@ -34,8 +34,67 @@
 #define LOD_FIX_NI_RDP_EXTENDED_ADDRS 0
 #endif
 
+#ifndef LOD_FIX_RDP_INVALID_LOAD_OP_BOUNDS
+#define LOD_FIX_RDP_INVALID_LOAD_OP_BOUNDS 0
+#endif
+
 namespace RT64 {
     // RDP
+#if LOD_FIX_RDP_INVALID_LOAD_OP_BOUNDS
+    static bool lodRdpLoadCommonLooksInvalid(const LoadTile &loadTile, const LoadTexture &loadTexture) {
+        return (loadTexture.width == 0) ||
+            (loadTile.siz > G_IM_SIZ_32b) ||
+            (loadTexture.siz > G_IM_SIZ_32b) ||
+            (loadTile.tmem >= RDP_TMEM_WORDS);
+    }
+
+    static void lodTraceInvalidLoadOp(const char *opName, const LoadTile &loadTile, const LoadTexture &loadTexture) {
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+        static uint32_t invalidLoadTraceCount = 0;
+        invalidLoadTraceCount++;
+        if ((invalidLoadTraceCount <= 32) || ((invalidLoadTraceCount % 100) == 0)) {
+            fprintf(stderr,
+                "[RDP_LOAD_GUARD] skip #%u op=%s tex_addr=0x%08X tex_width=%u tex_fmt=%u tex_siz=%u tile_fmt=%u tile_siz=%u line=%u tmem=%u uls=%u ult=%u lrs=%u lrt=%u\n",
+                invalidLoadTraceCount,
+                opName != nullptr ? opName : "?",
+                loadTexture.address,
+                loadTexture.width,
+                loadTexture.fmt,
+                loadTexture.siz,
+                loadTile.fmt,
+                loadTile.siz,
+                loadTile.line,
+                loadTile.tmem,
+                loadTile.uls,
+                loadTile.ult,
+                loadTile.lrs,
+                loadTile.lrt);
+        }
+#else
+        (void)opName;
+        (void)loadTile;
+        (void)loadTexture;
+#endif
+    }
+
+    static bool lodRdpLoadTileLooksInvalid(const LoadTile &loadTile, const LoadTexture &loadTexture) {
+        return lodRdpLoadCommonLooksInvalid(loadTile, loadTexture) ||
+            ((loadTile.lrs >> 2) < (loadTile.uls >> 2)) ||
+            ((loadTile.lrt >> 2) < (loadTile.ult >> 2));
+    }
+
+    static bool lodRdpLoadBlockLooksInvalid(const LoadTile &loadTile, const LoadTexture &loadTexture) {
+        return lodRdpLoadCommonLooksInvalid(loadTile, loadTexture) ||
+            (loadTile.lrs < loadTile.uls);
+    }
+
+    static bool lodRdpLoadTLUTLooksInvalid(const LoadTile &loadTile, const LoadTexture &loadTexture) {
+        return lodRdpLoadCommonLooksInvalid(loadTile, loadTexture) ||
+            ((loadTile.lrs >> 2) < (loadTile.uls >> 2)) ||
+            ((loadTile.lrt >> 2) < (loadTile.ult >> 2));
+    }
+#endif
+
     static uint8_t getCommandLength(uint32_t commandId) {
         if (commandId == (G_TEXRECT & 0x3F) || commandId == (G_TEXRECTFLIP & 0x3F)) {
             return 2;
@@ -523,6 +582,12 @@ namespace RT64 {
     }
 
     void RDP::loadTileOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred) {
+#if LOD_FIX_RDP_INVALID_LOAD_OP_BOUNDS
+        if (lodRdpLoadTileLooksInvalid(loadTile, loadTexture)) {
+            lodTraceInvalidLoadOp("tile", loadTile, loadTexture);
+            return;
+        }
+#endif
         const uint32_t bytesOffset = (loadTile.uls >> 2) << loadTexture.siz >> 1;
         const uint32_t bytesPerRow = loadTexture.width << loadTexture.siz >> 1;
         const uint32_t textureStart = loadTexture.address + bytesOffset + bytesPerRow * (loadTile.ult >> 2);
@@ -562,6 +627,12 @@ namespace RT64 {
     }
 
     void RDP::loadBlockOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred) {
+#if LOD_FIX_RDP_INVALID_LOAD_OP_BOUNDS
+        if (lodRdpLoadBlockLooksInvalid(loadTile, loadTexture)) {
+            lodTraceInvalidLoadOp("block", loadTile, loadTexture);
+            return;
+        }
+#endif
         // Deduce loading parameters for block and the texture address.
         const uint32_t bytesOffset = loadTile.uls << loadTexture.siz >> 1;
         const uint32_t bytesPerRow = loadTexture.width << loadTexture.siz >> 1;
@@ -598,6 +669,12 @@ namespace RT64 {
     }
 
     void RDP::loadTLUTOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred) {
+#if LOD_FIX_RDP_INVALID_LOAD_OP_BOUNDS
+        if (lodRdpLoadTLUTLooksInvalid(loadTile, loadTexture)) {
+            lodTraceInvalidLoadOp("tlut", loadTile, loadTexture);
+            return;
+        }
+#endif
         // Deduce loading parameters for TLUT and the texture address.
         const uint32_t bytesOffset = (loadTile.uls >> 2) << loadTexture.siz >> 1;
         const uint32_t bytesPerRow = loadTexture.width << loadTexture.siz >> 1;

@@ -555,6 +555,25 @@ namespace RT64 {
 #if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
             DisplayList *lodStaleNiFallbackTarget = nullptr;
 #endif
+            auto lodEndInvalidBranchDl = [&](const char *reason) {
+                if ((*dl)->p0(16, 1) != 0) {
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+                    static uint32_t invalidBranchEndCount = 0;
+                    invalidBranchEndCount++;
+                    if ((invalidBranchEndCount <= 16) || ((invalidBranchEndCount % 100) == 0)) {
+                        fprintf(stderr,
+                            "[RT64-DL][BRANCH_END] #%u reason=%s src=0x%08X phys=0x%08X\n",
+                            invalidBranchEndCount,
+                            reason != nullptr ? reason : "?",
+                            (*dl)->w1,
+                            rdramAddress);
+                    }
+#else
+                    (void)reason;
+#endif
+                    *dl = nullptr;
+                }
+            };
 
             // Guard: skip sub-DL if address is outside RDRAM.
             // Allow 0x8E/0x8F region (LoD NI overlay data via MEM_W).
@@ -565,6 +584,7 @@ namespace RT64 {
                     if (++skip_count <= 5) {
                         fprintf(stderr, "[RT64-DL] Skipping sub-DL at phys 0x%08X (out of RDRAM)\n", rdramAddress);
                     }
+                    lodEndInvalidBranchDl("out-of-rdram");
                     return;
                 }
 #if LOD_FIX_RUN_DL_NI_BOUNDS
@@ -592,6 +612,7 @@ namespace RT64 {
                             niSpan);
                     }
 #endif
+                    lodEndInvalidBranchDl("ni-bounds");
                     return;
                 }
 #endif
@@ -648,6 +669,7 @@ lod_run_dl_have_target:
                     }
                     invalidDlSkipCount++;
 #endif
+                        lodEndInvalidBranchDl("guard");
                         return;
                     }
                 }
