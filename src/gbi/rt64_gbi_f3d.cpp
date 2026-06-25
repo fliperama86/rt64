@@ -487,6 +487,106 @@ namespace RT64 {
             return false;
         }
 
+        static bool lodRunDlIsExtendedNiAddress(uint32_t rdramAddress) {
+            const uint32_t hi = (rdramAddress >> 24) & 0xFFU;
+            return (hi == 0x8E) || (hi == 0x8F);
+        }
+
+        static bool lodRunDlWordLooksLikeMips(uint32_t word, bool &strong) {
+            strong = false;
+            if (word == 0) {
+                return false;
+            }
+
+            const uint32_t op = word >> 26;
+            if (op == 0x00) {
+                const uint32_t funct = word & 0x3FU;
+                switch (funct) {
+                case 0x00: // SLL
+                case 0x02: // SRL
+                case 0x03: // SRA
+                case 0x04: // SLLV
+                case 0x06: // SRLV
+                case 0x07: // SRAV
+                case 0x08: // JR
+                case 0x09: // JALR
+                case 0x20: // ADD
+                case 0x21: // ADDU
+                case 0x22: // SUB
+                case 0x23: // SUBU
+                case 0x24: // AND
+                case 0x25: // OR
+                case 0x26: // XOR
+                case 0x27: // NOR
+                case 0x2A: // SLT
+                case 0x2B: // SLTU
+                    strong = (funct != 0x00);
+                    return true;
+                default:
+                    return false;
+                }
+            }
+
+            switch (op) {
+            case 0x02: // J
+            case 0x03: // JAL
+            case 0x04: // BEQ
+            case 0x05: // BNE
+            case 0x06: // BLEZ
+            case 0x07: // BGTZ
+            case 0x08: // ADDI
+            case 0x09: // ADDIU
+            case 0x0A: // SLTI
+            case 0x0B: // SLTIU
+            case 0x0C: // ANDI
+            case 0x0D: // ORI
+            case 0x0E: // XORI
+            case 0x0F: // LUI
+            case 0x10: // COP0
+            case 0x11: // COP1
+                return true;
+            case 0x20: // LB
+            case 0x21: // LH
+            case 0x22: // LWL
+            case 0x23: // LW
+            case 0x24: // LBU
+            case 0x25: // LHU
+            case 0x26: // LWR
+            case 0x28: // SB
+            case 0x29: // SH
+            case 0x2A: // SWL
+            case 0x2B: // SW
+            case 0x2E: // SWR
+                strong = true;
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        static bool lodRunDlTargetLooksLikeMipsCode(const DisplayList *target) {
+            if (target == nullptr) {
+                return false;
+            }
+
+            uint32_t mipsLikeWords = 0;
+            uint32_t strongMipsWords = 0;
+            for (uint32_t i = 0; i < 8; i++) {
+                const uint32_t words[2] = { target[i].w0, target[i].w1 };
+                for (uint32_t j = 0; j < 2; j++) {
+                    bool strong = false;
+                    if (lodRunDlWordLooksLikeMips(words[j], strong)) {
+                        mipsLikeWords++;
+                        if (strong) {
+                            strongMipsWords++;
+                        }
+                    }
+                }
+            }
+
+            return (mipsLikeWords >= 8) && (strongMipsWords >= 4);
+        }
+
         static DisplayList *lodRunDlTryStaleNiFallback(State *state, uint32_t segmentedAddress,
                                                        const char *reason) {
             for (uint32_t attempt = 0; attempt < 16; attempt++) {
@@ -640,22 +740,56 @@ lod_run_dl_have_target:
                 bool likelyGBI = (firstOpcode <= 0x0B) || (firstOpcode >= 0xB4);
 #endif
                 bool isEmpty = (target->w0 == 0 && target->w1 == 0);
+#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
+                bool currentNiLooksLikeMips = (lodStaleNiFallbackTarget == nullptr) &&
+                    lodRunDlIsExtendedNiAddress(rdramAddress) &&
+                    lodRunDlTargetLooksLikeMipsCode(target);
+#endif
 #if LOD_ENABLE_RUN_DL_SUSPICIOUS_TRACE
                 lodTraceSuspiciousRunDl(state, *dl, (*dl)->w1, rdramAddress, target, firstOpcode);
 #endif
 #if LOD_ENABLE_RENDER_GEOM_TRACE
-                lodTraceRunDl(state, *dl, (*dl)->w1, rdramAddress, target, isEmpty || !likelyGBI, isEmpty, firstOpcode);
-#endif
-                if (isEmpty || !likelyGBI) {
+                lodTraceRunDl(state, *dl, (*dl)->w1, rdramAddress, target,
 #if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-                    DisplayList *guardFallback = lodRunDlTryStaleNiFallback(state, (*dl)->w1, "guard");
+                    isEmpty || !likelyGBI || currentNiLooksLikeMips,
+#else
+                    isEmpty || !likelyGBI,
+#endif
+                    isEmpty, firstOpcode);
+#endif
+                if (isEmpty || !likelyGBI
+#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
+                    || currentNiLooksLikeMips
+#endif
+                ) {
+#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
+                    if (currentNiLooksLikeMips) {
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+                        static uint32_t currentNiMipsRejectCount = 0;
+                        currentNiMipsRejectCount++;
+                        if ((currentNiMipsRejectCount <= 32) || ((currentNiMipsRejectCount % 100) == 0)) {
+                            fprintf(stderr,
+                                "[RT64-DL][NI_MIPS] reject #%u src=0x%08X phys=0x%08X op=0x%02X w0=0x%08X w1=0x%08X\n",
+                                currentNiMipsRejectCount,
+                                (*dl)->w1,
+                                rdramAddress,
+                                firstOpcode,
+                                target->w0,
+                                target->w1);
+                        }
+#endif
+                    }
+
+                    DisplayList *guardFallback = lodRunDlTryStaleNiFallback(state, (*dl)->w1,
+                        currentNiLooksLikeMips ? "current-ni-mips" : "guard");
                     if (guardFallback != nullptr) {
                         target = guardFallback;
                         firstOpcode = (target->w0 >> 24) & 0xFF;
                         likelyGBI = lodRunDlOpcodeLikelyGBI(state, firstOpcode);
                         isEmpty = (target->w0 == 0 && target->w1 == 0);
+                        currentNiLooksLikeMips = false;
                     }
-                    if (isEmpty || !likelyGBI)
+                    if (isEmpty || !likelyGBI || currentNiLooksLikeMips)
 #endif
                     {
 #if LOD_ENABLE_RENDER_ADDR_TRACE
