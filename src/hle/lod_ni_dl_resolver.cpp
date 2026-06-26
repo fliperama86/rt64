@@ -284,7 +284,7 @@ namespace RT64 {
 
         if (span >= sizeof(DisplayList) && offset <= (span - sizeof(DisplayList))) {
             DisplayList *liveTarget = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress));
-            if (lodNiDlTargetHasValidStart(state, liveTarget)) {
+            if (lodNiDlTargetStructurallyValid(state, liveTarget)) {
                 return lodNiDlResolved(LodNiDlResolveSource::LiveCurrentPair, liveTarget,
                     segmentedAddress, rdramAddress, vramBase, offset, span, livePair, "live");
             }
