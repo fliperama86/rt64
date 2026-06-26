@@ -350,6 +350,7 @@ set (SOURCES
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_framebuffer_pair.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_framebuffer_storage.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_game_frame.cpp"
+    "${PROJECT_SOURCE_DIR}/src/hle/lod_ni_dl_resolver.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_interpreter.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_light_manager.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_present_queue.cpp"

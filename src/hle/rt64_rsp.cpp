@@ -13,6 +13,7 @@
 #include "common/rt64_common.h"
 #include "common/rt64_math.h"
 #include "gbi/rt64_f3d.h"
+#include "lod_ni_dl_resolver.h"
 #include "shared/rt64_rsp_fog.h"
 
 #include "rt64_interpreter.h"
@@ -61,43 +62,10 @@ extern "C" {
 #define LOD_FIX_RUN_DL_STALE_NI_FALLBACK 0
 #endif
 
-#if LOD_FIX_RUN_DL_NI_BOUNDS
-extern "C" uint32_t ni_overlay_loaded_span(uint32_t vram);
-#endif
-
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-extern "C" const void* lod_ni_stale_dl_candidate(uint8_t* rdram, uint32_t segmented_address,
-                                                  uint32_t min_size, uint32_t attempt,
-                                                  int* pair_out, uint32_t* source_out);
-#endif
-
 namespace RT64 {
     // RSP
 
     constexpr float DepthRange = 1024.0f;
-
-#if LOD_FIX_RUN_DL_NI_BOUNDS
-    static bool lodNiExtendedDlTargetInLoadedSpan(uint32_t rdramAddress, uint32_t &vramBase, uint32_t &offset, uint32_t &span) {
-        const uint32_t hi = (rdramAddress >> 24) & 0xFF;
-        if (hi == 0x8E) {
-            vramBase = 0x0E000000U;
-            offset = rdramAddress - 0x8E000000U;
-        }
-        else if (hi == 0x8F) {
-            vramBase = 0x0F000000U;
-            offset = rdramAddress - 0x8F000000U;
-        }
-        else {
-            vramBase = 0;
-            offset = 0;
-            span = 0;
-            return false;
-        }
-
-        span = ni_overlay_loaded_span(vramBase);
-        return (span >= sizeof(DisplayList)) && (offset <= (span - sizeof(DisplayList)));
-    }
-#endif
 
 #if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
     static bool lodBranchDlOpcodeLikelyGBI(State *state, uint8_t opcode) {
@@ -108,121 +76,50 @@ namespace RT64 {
         return (opcode <= 0x0B) || (opcode >= 0xB4);
 #endif
     }
+#endif
 
-    static bool lodBranchDlTargetLooksValid(State *state, const DisplayList *target) {
-        if (target == nullptr) {
-            return false;
+#if LOD_FIX_RUN_DL_NI_BOUNDS || LOD_FIX_RUN_DL_STALE_NI_FALLBACK
+    static DisplayList *lodResolveBranchDlTarget(State *state, uint32_t segmentedAddress, uint32_t rdramAddress, const char *reason) {
+        const LodNiDlResolveResult niTarget = lodResolveNiDisplayListTarget(state, segmentedAddress, rdramAddress, reason);
+        if (niTarget.status == LodNiDlResolveStatus::Resolved) {
+            return niTarget.target;
         }
-
-        for (uint32_t i = 0; i < 64; i++) {
-            const uint8_t opcode = (target[i].w0 >> 24) & 0xFF;
-            const bool empty = (target[i].w0 == 0) && (target[i].w1 == 0);
-            if (empty) {
-                return false;
-            }
-            if ((i == 0) && (opcode == 0x00)) {
-                return false;
-            }
-            if (!lodBranchDlOpcodeLikelyGBI(state, opcode)) {
-                return false;
-            }
-            if (opcode == 0xDF) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    static DisplayList *lodBranchTryStaleNiFallback(State *state, uint32_t segmentedAddress, const char *reason) {
-        for (uint32_t attempt = 0; attempt < 16; attempt++) {
-            int pair = -1;
-            uint32_t source = 0;
-            const void *candidate = lod_ni_stale_dl_candidate(state->RDRAM, segmentedAddress,
-                sizeof(DisplayList), attempt, &pair, &source);
-            if (candidate == nullptr) {
-                return nullptr;
-            }
-
-            DisplayList *target = (DisplayList *)candidate;
-            if (!lodBranchDlTargetLooksValid(state, target)) {
-                continue;
-            }
-
+        if (niTarget.status == LodNiDlResolveStatus::Rejected) {
 #if LOD_ENABLE_RENDER_ADDR_TRACE
-            static uint32_t staleNiBranchFallbackTraceCount = 0;
-            staleNiBranchFallbackTraceCount++;
-            if ((staleNiBranchFallbackTraceCount <= 96) || ((staleNiBranchFallbackTraceCount % 500) == 0)) {
+            static uint32_t niRejectCount = 0;
+            niRejectCount++;
+            if ((niRejectCount <= 32) || ((niRejectCount % 100) == 0)) {
                 fprintf(stderr,
-                    "[BRANCH_DL_STALE_NI] #%u reason=%s src=0x%08X pair=%d source=%u w0=0x%08X w1=0x%08X\n",
-                    staleNiBranchFallbackTraceCount,
+                    "[BRANCH_DL_NI_RESOLVE] reject #%u reason=%s src=0x%08X phys=0x%08X reject=%s pair=%d off=0x%X span=0x%X\n",
+                    niRejectCount,
                     reason != nullptr ? reason : "?",
                     segmentedAddress,
-                    pair,
-                    source,
-                    target->w0,
-                    target->w1);
+                    rdramAddress,
+                    niTarget.reason != nullptr ? niTarget.reason : "?",
+                    niTarget.pair,
+                    niTarget.offset,
+                    niTarget.span);
+            }
+#endif
+            return nullptr;
+        }
+
+        if (rdramAddress >= 0x20000000U) {
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+            static uint32_t nonNiSkipCount = 0;
+            nonNiSkipCount++;
+            if ((nonNiSkipCount <= 16) || ((nonNiSkipCount % 100) == 0)) {
+                fprintf(stderr,
+                    "[BRANCH_DL_BOUNDS] skip #%u reason=%s src=0x%08X phys=0x%08X non-ni\n",
+                    nonNiSkipCount, reason != nullptr ? reason : "?", segmentedAddress, rdramAddress);
             }
 #else
             (void)reason;
 #endif
-            return target;
-        }
-
-        return nullptr;
-    }
-#endif
-
-#if LOD_FIX_RUN_DL_NI_BOUNDS
-    static DisplayList *lodResolveBranchDlTarget(State *state, uint32_t segmentedAddress, uint32_t rdramAddress, const char *reason) {
-        if (rdramAddress >= 0x20000000U) {
-            const uint32_t hi = (rdramAddress >> 24) & 0xFF;
-            if (hi != 0x8E && hi != 0x8F) {
-#if LOD_ENABLE_RENDER_ADDR_TRACE
-                static uint32_t nonNiSkipCount = 0;
-                nonNiSkipCount++;
-                if ((nonNiSkipCount <= 16) || ((nonNiSkipCount % 100) == 0)) {
-                    fprintf(stderr,
-                        "[BRANCH_DL_BOUNDS] skip #%u reason=%s src=0x%08X phys=0x%08X non-ni\n",
-                        nonNiSkipCount, reason != nullptr ? reason : "?", segmentedAddress, rdramAddress);
-                }
-#else
-                (void)reason;
-#endif
-                return nullptr;
-            }
-
-            uint32_t niVramBase = 0;
-            uint32_t niOffset = 0;
-            uint32_t niSpan = 0;
-            if (!lodNiExtendedDlTargetInLoadedSpan(rdramAddress, niVramBase, niOffset, niSpan)) {
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-                DisplayList *fallback = lodBranchTryStaleNiFallback(state, segmentedAddress, reason);
-                if (fallback != nullptr) {
-                    return fallback;
-                }
-#endif
-#if LOD_ENABLE_RENDER_ADDR_TRACE
-                static uint32_t niBoundsSkipCount = 0;
-                niBoundsSkipCount++;
-                if ((niBoundsSkipCount <= 16) || ((niBoundsSkipCount % 100) == 0)) {
-                    fprintf(stderr,
-                        "[BRANCH_DL_BOUNDS] skip #%u reason=%s src=0x%08X phys=0x%08X vram=0x%08X off=0x%X span=0x%X\n",
-                        niBoundsSkipCount,
-                        reason != nullptr ? reason : "?",
-                        segmentedAddress,
-                        rdramAddress,
-                        niVramBase,
-                        niOffset,
-                        niSpan);
-                }
-#endif
-                return nullptr;
-            }
+            return nullptr;
         }
 
         DisplayList *target = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress));
-        const uint32_t hi = (rdramAddress >> 24) & 0xFF;
         const uint8_t firstOpcode = (target->w0 >> 24) & 0xFF;
         const bool isEmpty = (target->w0 == 0) && (target->w1 == 0);
 #if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
@@ -231,16 +128,6 @@ namespace RT64 {
         const bool likelyGBI = (firstOpcode <= 0x0B) || (firstOpcode >= 0xB4);
 #endif
         if (isEmpty || !likelyGBI) {
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-            if (hi == 0x8E || hi == 0x8F) {
-                DisplayList *fallback = lodBranchTryStaleNiFallback(state, segmentedAddress, reason);
-                if (fallback != nullptr) {
-                    return fallback;
-                }
-            }
-#if LOD_ENABLE_RENDER_ADDR_TRACE
-#endif
-#endif
 #if LOD_ENABLE_RENDER_ADDR_TRACE
             static uint32_t firstOpcodeSkipCount = 0;
             firstOpcodeSkipCount++;
@@ -258,32 +145,6 @@ namespace RT64 {
             }
 #endif
             return nullptr;
-        }
-
-        if (hi == 0x8E || hi == 0x8F) {
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-            if (!lodBranchDlTargetLooksValid(state, target)) {
-                DisplayList *fallback = lodBranchTryStaleNiFallback(state, segmentedAddress, reason);
-                if (fallback != nullptr) {
-                    return fallback;
-                }
-#if LOD_ENABLE_RENDER_ADDR_TRACE
-                static uint32_t guardSkipCount = 0;
-                guardSkipCount++;
-                if ((guardSkipCount <= 16) || ((guardSkipCount % 100) == 0)) {
-                    fprintf(stderr,
-                        "[BRANCH_DL_NI_GUARD] skip #%u reason=%s src=0x%08X phys=0x%08X w0=0x%08X w1=0x%08X\n",
-                        guardSkipCount,
-                        reason != nullptr ? reason : "?",
-                        segmentedAddress,
-                        rdramAddress,
-                        target->w0,
-                        target->w1);
-                }
-#endif
-                return nullptr;
-            }
-#endif
         }
 
         return target;
@@ -658,7 +519,7 @@ namespace RT64 {
     uint32_t RSP::fromSegmentedMasked(uint32_t segAddress) {
         uint32_t resolved = fromSegmented(segAddress);
         // LoD: TLB segment addresses (0x8E/0x8F region) bypass the 8MB DMA mask
-        // — they point to the extended RDRAM region where NI overlay code writes.
+        // They point to the extended RDRAM region where NI overlay code writes.
         if (lodIsNiExtendedAddress(resolved)) {
 #if LOD_ENABLE_RENDER_ADDR_TRACE
             lodTraceRspAddress("fromSegmentedMasked-ni", segAddress, resolved);

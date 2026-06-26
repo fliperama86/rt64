@@ -17,6 +17,7 @@
 #include "rt64_f3d.h"
 #include "rt64_gbi_extended.h"
 #include "rt64_gbi_rdp.h"
+#include "hle/lod_ni_dl_resolver.h"
 #include "hle/rt64_interpreter.h"
 
 #ifndef LOD_ENABLE_RENDER_ADDR_TRACE
@@ -45,15 +46,6 @@
 
 #ifndef LOD_FIX_RUN_DL_STALE_NI_FALLBACK
 #define LOD_FIX_RUN_DL_STALE_NI_FALLBACK 0
-#endif
-
-#if LOD_FIX_RUN_DL_NI_BOUNDS
-extern "C" uint32_t ni_overlay_loaded_span(uint32_t vram);
-#endif
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-extern "C" const void* lod_ni_stale_dl_candidate(uint8_t* rdram, uint32_t segmented_address,
-                                                  uint32_t min_size, uint32_t attempt,
-                                                  int* pair_out, uint32_t* source_out);
 #endif
 
 namespace RT64 {
@@ -452,209 +444,9 @@ namespace RT64 {
         }
 
 
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-        static bool lodRunDlOpcodeLikelyGBI(State *state, uint8_t opcode) {
-#if LOD_FIX_RUN_DL_USE_GBI_MAP
-            const GBI *activeGBI = (state->ext.interpreter != nullptr) ? state->ext.interpreter->hleGBI : nullptr;
-            return (activeGBI != nullptr) && (activeGBI->map[opcode] != nullptr);
-#else
-            return (opcode <= 0x0B) || (opcode >= 0xB4);
-#endif
-        }
-
-        static bool lodRunDlStaleCandidateLooksValid(State *state, const DisplayList *target) {
-            if (target == nullptr) {
-                return false;
-            }
-
-            for (uint32_t i = 0; i < 64; i++) {
-                const uint8_t opcode = (target[i].w0 >> 24) & 0xFF;
-                const bool empty = (target[i].w0 == 0 && target[i].w1 == 0);
-                if (empty) {
-                    return false;
-                }
-                if ((i == 0) && (opcode == 0x00)) {
-                    return false;
-                }
-                if (!lodRunDlOpcodeLikelyGBI(state, opcode)) {
-                    return false;
-                }
-                if (opcode == 0xDF) {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        static bool lodRunDlIsExtendedNiAddress(uint32_t rdramAddress) {
-            const uint32_t hi = (rdramAddress >> 24) & 0xFFU;
-            return (hi == 0x8E) || (hi == 0x8F);
-        }
-
-        static bool lodRunDlWordLooksLikeMips(uint32_t word, bool &strong) {
-            strong = false;
-            if (word == 0) {
-                return false;
-            }
-
-            const uint32_t op = word >> 26;
-            if (op == 0x00) {
-                const uint32_t funct = word & 0x3FU;
-                switch (funct) {
-                case 0x00: // SLL
-                case 0x02: // SRL
-                case 0x03: // SRA
-                case 0x04: // SLLV
-                case 0x06: // SRLV
-                case 0x07: // SRAV
-                case 0x08: // JR
-                case 0x09: // JALR
-                case 0x20: // ADD
-                case 0x21: // ADDU
-                case 0x22: // SUB
-                case 0x23: // SUBU
-                case 0x24: // AND
-                case 0x25: // OR
-                case 0x26: // XOR
-                case 0x27: // NOR
-                case 0x2A: // SLT
-                case 0x2B: // SLTU
-                    strong = (funct != 0x00);
-                    return true;
-                default:
-                    return false;
-                }
-            }
-
-            switch (op) {
-            case 0x02: // J
-            case 0x03: // JAL
-            case 0x04: // BEQ
-            case 0x05: // BNE
-            case 0x06: // BLEZ
-            case 0x07: // BGTZ
-            case 0x08: // ADDI
-            case 0x09: // ADDIU
-            case 0x0A: // SLTI
-            case 0x0B: // SLTIU
-            case 0x0C: // ANDI
-            case 0x0D: // ORI
-            case 0x0E: // XORI
-            case 0x0F: // LUI
-            case 0x10: // COP0
-            case 0x11: // COP1
-                return true;
-            case 0x20: // LB
-            case 0x21: // LH
-            case 0x22: // LWL
-            case 0x23: // LW
-            case 0x24: // LBU
-            case 0x25: // LHU
-            case 0x26: // LWR
-            case 0x28: // SB
-            case 0x29: // SH
-            case 0x2A: // SWL
-            case 0x2B: // SW
-            case 0x2E: // SWR
-                strong = true;
-                return true;
-            default:
-                return false;
-            }
-        }
-
-        static bool lodRunDlTargetLooksLikeMipsCode(const DisplayList *target) {
-            if (target == nullptr) {
-                return false;
-            }
-
-            uint32_t mipsLikeWords = 0;
-            uint32_t strongMipsWords = 0;
-            for (uint32_t i = 0; i < 8; i++) {
-                const uint32_t words[2] = { target[i].w0, target[i].w1 };
-                for (uint32_t j = 0; j < 2; j++) {
-                    bool strong = false;
-                    if (lodRunDlWordLooksLikeMips(words[j], strong)) {
-                        mipsLikeWords++;
-                        if (strong) {
-                            strongMipsWords++;
-                        }
-                    }
-                }
-            }
-
-            return (mipsLikeWords >= 8) && (strongMipsWords >= 4);
-        }
-
-        static DisplayList *lodRunDlTryStaleNiFallback(State *state, uint32_t segmentedAddress,
-                                                       const char *reason) {
-            for (uint32_t attempt = 0; attempt < 16; attempt++) {
-                int pair = -1;
-                uint32_t source = 0;
-                const void *candidate = lod_ni_stale_dl_candidate(state->RDRAM, segmentedAddress,
-                    sizeof(DisplayList), attempt, &pair, &source);
-                if (candidate == nullptr) {
-                    return nullptr;
-                }
-
-                DisplayList *target = (DisplayList *)candidate;
-                if (!lodRunDlStaleCandidateLooksValid(state, target)) {
-                    continue;
-                }
-
-#if LOD_ENABLE_RENDER_ADDR_TRACE
-                static uint32_t staleNiFallbackTraceCount = 0;
-                staleNiFallbackTraceCount++;
-                if ((staleNiFallbackTraceCount <= 96) || ((staleNiFallbackTraceCount % 500) == 0)) {
-                    fprintf(stderr,
-                        "[RUN_DL_STALE_NI] #%u reason=%s src=0x%08X pair=%d source=%u w0=0x%08X w1=0x%08X\n",
-                        staleNiFallbackTraceCount,
-                        reason != nullptr ? reason : "?",
-                        segmentedAddress,
-                        pair,
-                        source,
-                        target->w0,
-                        target->w1);
-                }
-#else
-                (void)reason;
-#endif
-                return target;
-            }
-
-            return nullptr;
-        }
-#endif
-
-#if LOD_FIX_RUN_DL_NI_BOUNDS
-        static bool lodNiExtendedDlTargetInLoadedSpan(uint32_t rdramAddress, uint32_t &vramBase, uint32_t &offset, uint32_t &span) {
-            const uint32_t hi = (rdramAddress >> 24) & 0xFF;
-            if (hi == 0x8E) {
-                vramBase = 0x0E000000U;
-                offset = rdramAddress - 0x8E000000U;
-            }
-            else if (hi == 0x8F) {
-                vramBase = 0x0F000000U;
-                offset = rdramAddress - 0x8F000000U;
-            }
-            else {
-                vramBase = 0;
-                offset = 0;
-                span = 0;
-                return false;
-            }
-
-            span = ni_overlay_loaded_span(vramBase);
-            return (span >= sizeof(DisplayList)) && (offset <= (span - sizeof(DisplayList)));
-        }
-#endif
 
         void runDl(State *state, DisplayList **dl) {
             const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-            DisplayList *lodStaleNiFallbackTarget = nullptr;
-#endif
             auto lodEndInvalidBranchDl = [&](const char *reason) {
                 if ((*dl)->p0(16, 1) != 0) {
 #if LOD_ENABLE_RENDER_ADDR_TRACE
@@ -675,11 +467,35 @@ namespace RT64 {
                 }
             };
 
-            // Guard: skip sub-DL if address is outside RDRAM.
-            // Allow 0x8E/0x8F region (LoD NI overlay data via MEM_W).
-            if (rdramAddress >= 0x20000000) {
-                uint32_t hi = (rdramAddress >> 24) & 0xFF;
-                if (hi != 0x8E && hi != 0x8F) {
+            DisplayList *target = nullptr;
+#if LOD_FIX_RUN_DL_NI_BOUNDS || LOD_FIX_RUN_DL_STALE_NI_FALLBACK
+            const LodNiDlResolveResult niTarget = lodResolveNiDisplayListTarget(state, (*dl)->w1, rdramAddress, "G_DL");
+            if (niTarget.status == LodNiDlResolveStatus::Rejected) {
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+                static uint32_t niRejectCount = 0;
+                niRejectCount++;
+                if ((niRejectCount <= 32) || ((niRejectCount % 100) == 0)) {
+                    fprintf(stderr,
+                        "[RT64-DL][NI_RESOLVE] reject #%u src=0x%08X phys=0x%08X reason=%s pair=%d off=0x%X span=0x%X\n",
+                        niRejectCount,
+                        (*dl)->w1,
+                        rdramAddress,
+                        niTarget.reason != nullptr ? niTarget.reason : "?",
+                        niTarget.pair,
+                        niTarget.offset,
+                        niTarget.span);
+                }
+#endif
+                lodEndInvalidBranchDl(niTarget.reason != nullptr ? niTarget.reason : "ni-resolve");
+                return;
+            }
+            if (niTarget.status == LodNiDlResolveStatus::Resolved) {
+                target = niTarget.target;
+            }
+#endif
+
+            if (target == nullptr) {
+                if (rdramAddress >= 0x20000000U) {
                     static int skip_count = 0;
                     if (++skip_count <= 5) {
                         fprintf(stderr, "[RT64-DL] Skipping sub-DL at phys 0x%08X (out of RDRAM)\n", rdramAddress);
@@ -687,111 +503,27 @@ namespace RT64 {
                     lodEndInvalidBranchDl("out-of-rdram");
                     return;
                 }
-#if LOD_FIX_RUN_DL_NI_BOUNDS
-                uint32_t niVramBase = 0;
-                uint32_t niOffset = 0;
-                uint32_t niSpan = 0;
-                if (!lodNiExtendedDlTargetInLoadedSpan(rdramAddress, niVramBase, niOffset, niSpan)) {
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-                    lodStaleNiFallbackTarget = lodRunDlTryStaleNiFallback(state, (*dl)->w1, "bounds");
-                    if (lodStaleNiFallbackTarget != nullptr) {
-                        goto lod_run_dl_have_target;
-                    }
-#endif
-#if LOD_ENABLE_RENDER_ADDR_TRACE
-                    static uint32_t niBoundsSkipCount = 0;
-                    niBoundsSkipCount++;
-                    if ((niBoundsSkipCount <= 16) || ((niBoundsSkipCount % 100) == 0)) {
-                        fprintf(stderr,
-                            "[RT64-DL][NI_BOUNDS] skip #%u src=0x%08X phys=0x%08X vram=0x%08X off=0x%X span=0x%X\n",
-                            niBoundsSkipCount,
-                            (*dl)->w1,
-                            rdramAddress,
-                            niVramBase,
-                            niOffset,
-                            niSpan);
-                    }
-#endif
-                    lodEndInvalidBranchDl("ni-bounds");
-                    return;
-                }
-#endif
+                target = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress));
             }
 
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-lod_run_dl_have_target:
-            DisplayList *target = (lodStaleNiFallbackTarget != nullptr)
-                ? lodStaleNiFallbackTarget
-                : reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress));
-#else
-            DisplayList *target = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress));
-#endif
-
-            // Guard: skip if target doesn't look like valid DL data.
-            // Valid GBI opcodes for F3DEX2 are in specific ranges (0x01-0x0B, 0xB6-0xFF).
-            // MIPS instructions (which start with opcodes like 0x24, 0x27, 0x8C, 0xA4, etc.)
-            // are NOT valid GBI commands. Check the first command's opcode.
+            // Guard: skip if target doesn't look like display-list data.
             {
-                uint8_t firstOpcode = (target->w0 >> 24) & 0xFF;
+                const uint8_t firstOpcode = (target->w0 >> 24) & 0xFF;
 #if LOD_FIX_RUN_DL_USE_GBI_MAP
                 const GBI *activeGBI = (state->ext.interpreter != nullptr) ? state->ext.interpreter->hleGBI : nullptr;
-                bool likelyGBI = (activeGBI != nullptr) && (activeGBI->map[firstOpcode] != nullptr);
+                const bool likelyGBI = (activeGBI != nullptr) && (activeGBI->map[firstOpcode] != nullptr);
 #else
-                bool likelyGBI = (firstOpcode <= 0x0B) || (firstOpcode >= 0xB4);
+                const bool likelyGBI = (firstOpcode <= 0x0B) || (firstOpcode >= 0xB4);
 #endif
-                bool isEmpty = (target->w0 == 0 && target->w1 == 0);
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-                bool currentNiLooksLikeMips = (lodStaleNiFallbackTarget == nullptr) &&
-                    lodRunDlIsExtendedNiAddress(rdramAddress) &&
-                    lodRunDlTargetLooksLikeMipsCode(target);
-#endif
+                const bool isEmpty = (target->w0 == 0 && target->w1 == 0);
 #if LOD_ENABLE_RUN_DL_SUSPICIOUS_TRACE
                 lodTraceSuspiciousRunDl(state, *dl, (*dl)->w1, rdramAddress, target, firstOpcode);
 #endif
 #if LOD_ENABLE_RENDER_GEOM_TRACE
                 lodTraceRunDl(state, *dl, (*dl)->w1, rdramAddress, target,
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-                    isEmpty || !likelyGBI || currentNiLooksLikeMips,
-#else
-                    isEmpty || !likelyGBI,
+                    isEmpty || !likelyGBI, isEmpty, firstOpcode);
 #endif
-                    isEmpty, firstOpcode);
-#endif
-                if (isEmpty || !likelyGBI
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-                    || currentNiLooksLikeMips
-#endif
-                ) {
-#if LOD_FIX_RUN_DL_STALE_NI_FALLBACK
-                    if (currentNiLooksLikeMips) {
-#if LOD_ENABLE_RENDER_ADDR_TRACE
-                        static uint32_t currentNiMipsRejectCount = 0;
-                        currentNiMipsRejectCount++;
-                        if ((currentNiMipsRejectCount <= 32) || ((currentNiMipsRejectCount % 100) == 0)) {
-                            fprintf(stderr,
-                                "[RT64-DL][NI_MIPS] reject #%u src=0x%08X phys=0x%08X op=0x%02X w0=0x%08X w1=0x%08X\n",
-                                currentNiMipsRejectCount,
-                                (*dl)->w1,
-                                rdramAddress,
-                                firstOpcode,
-                                target->w0,
-                                target->w1);
-                        }
-#endif
-                    }
-
-                    DisplayList *guardFallback = lodRunDlTryStaleNiFallback(state, (*dl)->w1,
-                        currentNiLooksLikeMips ? "current-ni-mips" : "guard");
-                    if (guardFallback != nullptr) {
-                        target = guardFallback;
-                        firstOpcode = (target->w0 >> 24) & 0xFF;
-                        likelyGBI = lodRunDlOpcodeLikelyGBI(state, firstOpcode);
-                        isEmpty = (target->w0 == 0 && target->w1 == 0);
-                        currentNiLooksLikeMips = false;
-                    }
-                    if (isEmpty || !likelyGBI || currentNiLooksLikeMips)
-#endif
-                    {
+                if (isEmpty || !likelyGBI) {
 #if LOD_ENABLE_RENDER_ADDR_TRACE
                     static uint32_t invalidDlSkipCount = 0;
                     if (invalidDlSkipCount < 64) {
@@ -803,9 +535,8 @@ lod_run_dl_have_target:
                     }
                     invalidDlSkipCount++;
 #endif
-                        lodEndInvalidBranchDl("guard");
-                        return;
-                    }
+                    lodEndInvalidBranchDl("guard");
+                    return;
                 }
             }
 
