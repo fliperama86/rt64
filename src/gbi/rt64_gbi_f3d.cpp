@@ -20,6 +20,11 @@
 #include "hle/lod_ni_dl_resolver.h"
 #include "hle/rt64_interpreter.h"
 
+extern "C" {
+    extern uint32_t g_tlb_segment_0e;
+    extern uint32_t g_tlb_segment_0f;
+}
+
 #ifndef LOD_ENABLE_RENDER_ADDR_TRACE
 #define LOD_ENABLE_RENDER_ADDR_TRACE 0
 #endif
@@ -40,6 +45,14 @@
 #define LOD_FIX_RUN_DL_USE_GBI_MAP 0
 #endif
 
+#ifndef LOD_FIX_RUN_DL_STRUCTURAL_PREFIX
+#define LOD_FIX_RUN_DL_STRUCTURAL_PREFIX 0
+#endif
+
+#ifndef LOD_FIX_MALFORMED_DL_CLEAR_STACK
+#define LOD_FIX_MALFORMED_DL_CLEAR_STACK 0
+#endif
+
 #ifndef LOD_FIX_RUN_DL_NI_BOUNDS
 #define LOD_FIX_RUN_DL_NI_BOUNDS 0
 #endif
@@ -50,6 +63,67 @@
 
 namespace RT64 {
     namespace GBI_F3D {
+#if LOD_FIX_RUN_DL_STRUCTURAL_PREFIX
+        static uint32_t lodRunDlPointerOffset(State *state, const DisplayList *ptr) {
+            if ((state == nullptr) || (ptr == nullptr)) {
+                return 0xFFFFFFFFU;
+            }
+
+            const uintptr_t base = reinterpret_cast<uintptr_t>(state->RDRAM);
+            const uintptr_t cur = reinterpret_cast<uintptr_t>(ptr);
+            if (cur < base) {
+                return 0xFFFFFFFFU;
+            }
+
+            const uintptr_t offset = cur - base;
+            if (offset > RDRAMSize) {
+                return 0xFFFFFFFFU;
+            }
+
+            return static_cast<uint32_t>(offset);
+        }
+
+        static bool lodRunDlTargetPrefixValid(State *state, const GBI *activeGBI, const DisplayList *target,
+                                              uint32_t &badIndex, uint8_t &badOpcode, const char *&reason) {
+            badIndex = 0;
+            badOpcode = 0;
+            reason = nullptr;
+
+            if ((state == nullptr) || (target == nullptr)) {
+                reason = "null-target";
+                return false;
+            }
+
+            constexpr uint32_t MaxPrefixCommands = 16;
+            for (uint32_t i = 0; i < MaxPrefixCommands; i++) {
+                const uint32_t hostOffset = lodRunDlPointerOffset(state, target + i);
+                if ((hostOffset != 0xFFFFFFFFU) && (hostOffset > ((RDRAMSize + 1U) - sizeof(DisplayList)))) {
+                    badIndex = i;
+                    reason = "target-oob";
+                    return false;
+                }
+
+                const uint32_t w0 = target[i].w0;
+                const uint32_t w1 = target[i].w1;
+                const bool isEmpty = (w0 == 0) && (w1 == 0);
+                const uint8_t opCode = static_cast<uint8_t>(w0 >> 24);
+                const bool likelyGBI = (activeGBI != nullptr) && (activeGBI->map[opCode] != nullptr);
+                if (isEmpty || !likelyGBI) {
+                    badIndex = i;
+                    badOpcode = opCode;
+                    reason = isEmpty ? "empty-prefix" : "unknown-prefix-op";
+                    return false;
+                }
+
+                if (opCode == 0xDF) {
+                    return true;
+                }
+            }
+
+            return true;
+        }
+#endif
+
 #if LOD_ENABLE_RENDER_GEOM_TRACE
         extern "C" {
             uint32_t g_lod_render_dl_root_segmented = 0;
@@ -299,8 +373,14 @@ namespace RT64 {
             if (shouldLog) {
                 if (runDlTraceCount < 512) {
                     fprintf(stderr,
-                        "[RT64-GEOM][DL] #%u caller=0x%08X src=0x%08X phys=0x%08X op=0x%02X w0=0x%08X w1=0x%08X empty=%u invalid=%u\n",
-                        runDlTraceCount + 1, callerOffset, segmentedAddress, rdramAddress, firstOpcode,
+                        "[RT64-GEOM][DL] #%u caller=0x%08X src=0x%08X phys=0x%08X s6=0x%08X sE=0x%08X sF=0x%08X tlb0e=0x%08X tlb0f=0x%08X op=0x%02X w0=0x%08X w1=0x%08X empty=%u invalid=%u\n",
+                        runDlTraceCount + 1, callerOffset, segmentedAddress, rdramAddress,
+                        state->rsp->segments[6],
+                        state->rsp->segments[14],
+                        state->rsp->segments[15],
+                        g_tlb_segment_0e,
+                        g_tlb_segment_0f,
+                        firstOpcode,
                         target->w0, target->w1, empty ? 1U : 0U, invalid ? 1U : 0U);
                     if (invalid && !empty) {
                         for (uint32_t i = 0; i < 8; i++) {
@@ -463,6 +543,9 @@ namespace RT64 {
 #else
                     (void)reason;
 #endif
+#if LOD_FIX_MALFORMED_DL_CLEAR_STACK
+                    state->returnAddressStack.clear();
+#endif
                     *dl = nullptr;
                 }
             };
@@ -509,8 +592,8 @@ namespace RT64 {
             // Guard: skip if target doesn't look like display-list data.
             {
                 const uint8_t firstOpcode = (target->w0 >> 24) & 0xFF;
-#if LOD_FIX_RUN_DL_USE_GBI_MAP
                 const GBI *activeGBI = (state->ext.interpreter != nullptr) ? state->ext.interpreter->hleGBI : nullptr;
+#if LOD_FIX_RUN_DL_USE_GBI_MAP
                 const bool likelyGBI = (activeGBI != nullptr) && (activeGBI->map[firstOpcode] != nullptr);
 #else
                 const bool likelyGBI = (firstOpcode <= 0x0B) || (firstOpcode >= 0xB4);
@@ -538,6 +621,35 @@ namespace RT64 {
                     lodEndInvalidBranchDl("guard");
                     return;
                 }
+
+#if LOD_FIX_RUN_DL_STRUCTURAL_PREFIX
+                uint32_t badIndex = 0;
+                uint8_t badOpcode = 0;
+                const char *badReason = nullptr;
+                if (!lodRunDlTargetPrefixValid(state, activeGBI, target, badIndex, badOpcode, badReason)) {
+#if LOD_ENABLE_RENDER_ADDR_TRACE
+                    static uint32_t invalidDlPrefixSkipCount = 0;
+                    invalidDlPrefixSkipCount++;
+                    if ((invalidDlPrefixSkipCount <= 64) || ((invalidDlPrefixSkipCount % 100) == 0)) {
+                        const uint32_t badHostOffset = lodRunDlPointerOffset(state, target + badIndex);
+                        const bool badReadable = (badHostOffset != 0xFFFFFFFFU) && (badHostOffset <= ((RDRAMSize + 1U) - sizeof(DisplayList)));
+                        fprintf(stderr,
+                            "[RT64-DL][PREFIX_GUARD] #%u skip src=0x%08X phys=0x%08X reason=%s idx=%u op=0x%02X first=0x%02X w0=0x%08X w1=0x%08X\n",
+                            invalidDlPrefixSkipCount,
+                            (*dl)->w1,
+                            rdramAddress,
+                            badReason != nullptr ? badReason : "?",
+                            badIndex,
+                            badOpcode,
+                            firstOpcode,
+                            badReadable ? target[badIndex].w0 : 0,
+                            badReadable ? target[badIndex].w1 : 0);
+                    }
+#endif
+                    lodEndInvalidBranchDl(badReason != nullptr ? badReason : "prefix-guard");
+                    return;
+                }
+#endif
             }
 
 

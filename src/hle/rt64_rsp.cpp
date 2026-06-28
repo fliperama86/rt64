@@ -361,6 +361,65 @@ namespace RT64 {
             lightTraceCount++;
         }
     }
+
+    static bool lodTraceFloatBad(float value) {
+        return !std::isfinite(value) || (std::abs(value) > 10000000.0f);
+    }
+
+    static bool lodTraceTransformedPositionSuspicious(const hlslpp::float4 &tfPos, const hlslpp::float3 &screenPos) {
+        return lodTraceFloatBad(tfPos[0]) || lodTraceFloatBad(tfPos[1]) || lodTraceFloatBad(tfPos[2]) || lodTraceFloatBad(tfPos[3]) ||
+            lodTraceFloatBad(screenPos[0]) || lodTraceFloatBad(screenPos[1]) || lodTraceFloatBad(screenPos[2]) ||
+            (std::abs(tfPos[3]) < 0.0001f) ||
+            (std::abs(screenPos[0]) > 2048.0f) || (std::abs(screenPos[1]) > 2048.0f) || (std::abs(screenPos[2]) > 200000.0f);
+    }
+
+    static void lodTraceTransformedVertex(State *state, uint32_t localSlot, uint32_t globalIndex, uint32_t inputRdramAddress,
+        float inX, float inY, float inZ, const RSP::Vertex &rawVertex,
+        const hlslpp::float4 &tfPos, const hlslpp::float3 &screenPos,
+        const interop::RSPViewport &viewport, const hlslpp::float4x4 &mvp,
+        uint32_t transformIndex, uint32_t viewProjIndex,
+        uint32_t matrixSegmentedAddress, uint32_t matrixPhysicalAddress) {
+        if (!lodTraceTransformedPositionSuspicious(tfPos, screenPos)) {
+            return;
+        }
+
+        static uint32_t transformedTraceCount = 0;
+        if (transformedTraceCount < 512) {
+            fprintf(stderr,
+                "[RT64-GEOM][XFORM_OUTLIER] #%u dl=%llu start=0x%08X root=0x%08X/0x%08X local=%u global=%u input_phys=0x%08X src=0x%08X/+%u/L%u/%u in=(%.3f,%.3f,%.3f) raw=(%d,%d,%d) tf=(%.6g,%.6g,%.6g,%.6g) screen=(%.6g,%.6g,%.6g) vp_s=(%.6g,%.6g,%.6g) vp_t=(%.6g,%.6g,%.6g) xform=%u viewproj=%u mtx=0x%08X/0x%08X m0=(%.6g,%.6g,%.6g,%.6g) m1=(%.6g,%.6g,%.6g,%.6g) m2=(%.6g,%.6g,%.6g,%.6g) m3=(%.6g,%.6g,%.6g,%.6g)\n",
+                transformedTraceCount + 1,
+                state != nullptr ? static_cast<unsigned long long>(state->displayListCounter) : 0ULL,
+                state != nullptr ? state->displayListAddress : 0U,
+                g_lod_render_dl_root_segmented,
+                g_lod_render_dl_root_physical,
+                localSlot,
+                globalIndex,
+                inputRdramAddress,
+                (localSlot < RSP_MAX_VERTICES) ? lodTraceVertexSlotPhysical[localSlot] : 0U,
+                (localSlot < RSP_MAX_VERTICES) ? lodTraceVertexSlotSourceIndex[localSlot] : 0U,
+                (localSlot < RSP_MAX_VERTICES) ? lodTraceVertexSlotSerial[localSlot] : 0U,
+                (localSlot < RSP_MAX_VERTICES && lodTraceVertexSlotSuspiciousLoad[localSlot]) ? 1U : 0U,
+                inX, inY, inZ,
+                rawVertex.x, rawVertex.y, rawVertex.z,
+                tfPos[0], tfPos[1], tfPos[2], tfPos[3],
+                screenPos[0], screenPos[1], screenPos[2],
+                viewport.scale.x, viewport.scale.y, viewport.scale.z,
+                viewport.translate.x, viewport.translate.y, viewport.translate.z,
+                transformIndex,
+                viewProjIndex,
+                matrixSegmentedAddress,
+                matrixPhysicalAddress,
+                mvp[0][0], mvp[0][1], mvp[0][2], mvp[0][3],
+                mvp[1][0], mvp[1][1], mvp[1][2], mvp[1][3],
+                mvp[2][0], mvp[2][1], mvp[2][2], mvp[2][3],
+                mvp[3][0], mvp[3][1], mvp[3][2], mvp[3][3]);
+        }
+        else if (transformedTraceCount == 512) {
+            fprintf(stderr, "[RT64-GEOM][XFORM_OUTLIER] trace limit reached; suppressing further transformed vertex logs\n");
+        }
+        transformedTraceCount++;
+    }
+
 #endif
 
 
@@ -544,12 +603,12 @@ namespace RT64 {
 
     void RSP::setSegment(uint32_t seg, uint32_t address) {
         assert(seg < RSP_MAX_SEGMENTS);
+        const uint32_t originalAddress = address;
 #ifdef LOD_FIX_SEGMENT_86_BASES
         // LoD sometimes emits segment bases in the invalid 0x86xxxxxx range.
         // Treat them as KSEG0/RDRAM pointers so small HUD/effect/item textures
         // resolve to populated rdram+0x001xxxxx instead of empty rdram+0x061xxxxx.
         if (((address >> 24) & 0xFF) == 0x86) {
-            const uint32_t originalAddress = address;
             address = 0x80000000U | (address & 0x00FFFFFFU);
 #if LOD_ENABLE_RENDER_ADDR_TRACE
             lodTraceRspAddress("setSegment-86-base", originalAddress, address, seg);
@@ -557,6 +616,38 @@ namespace RT64 {
         }
 #endif
         segments[seg] = address;
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+        const uint32_t originalHi = (originalAddress >> 24) & 0xFFU;
+        const uint32_t normalizedHi = (address >> 24) & 0xFFU;
+        const bool interesting =
+            (seg == 0x06) || (seg == 0x0E) || (seg == 0x0F) ||
+            (originalHi == 0x06) || (originalHi == 0x86) ||
+            (originalHi == 0x0E) || (originalHi == 0x0F) ||
+            (originalHi == 0x8E) || (originalHi == 0x8F) ||
+            (normalizedHi == 0x86) || (normalizedHi == 0x8E) || (normalizedHi == 0x8F);
+        if (interesting) {
+            static uint32_t setSegmentTraceCount = 0;
+            if (setSegmentTraceCount < 256) {
+                fprintf(stderr,
+                    "[RT64-GEOM][SEGMENT] #%u dl=%llu start=0x%08X seg=%u raw=0x%08X stored=0x%08X s6=0x%08X sE=0x%08X sF=0x%08X tlb0e=0x%08X tlb0f=0x%08X\n",
+                    setSegmentTraceCount + 1,
+                    static_cast<unsigned long long>(state->displayListCounter),
+                    state->displayListAddress,
+                    seg,
+                    originalAddress,
+                    address,
+                    segments[6],
+                    segments[14],
+                    segments[15],
+                    g_tlb_segment_0e,
+                    g_tlb_segment_0f);
+            }
+            else if (setSegmentTraceCount == 256) {
+                fprintf(stderr, "[RT64-GEOM][SEGMENT] trace limit reached; suppressing further segment logs\n");
+            }
+            setSegmentTraceCount++;
+        }
+#endif
     }
 
     void RSP::matrixCommon(const hlslpp::float4x4 &floatMatrix, uint32_t address, uint8_t params) {
@@ -1163,10 +1254,21 @@ namespace RT64 {
 
         uint32_t floatIndex = globalIndex * 3;
         for (uint32_t i = dstIndex; i < dstMax; i++) {
-            const hlslpp::float4 tfPos = hlslpp::mul(hlslpp::float4(posFloats[floatIndex + 0], posFloats[floatIndex + 1], posFloats[floatIndex + 2], 1.0f), mvp);
+            const float inputX = posFloats[floatIndex + 0];
+            const float inputY = posFloats[floatIndex + 1];
+            const float inputZ = posFloats[floatIndex + 2];
+            const hlslpp::float4 tfPos = hlslpp::mul(hlslpp::float4(inputX, inputY, inputZ, 1.0f), mvp);
             const interop::RSPViewport &viewport = viewportStack[viewportStackSize - 1];
+            const hlslpp::float3 screenPos = (tfPos.xyz / hlslpp::float3(tfPos.w, -tfPos.w, tfPos.w)) * viewport.scale + viewport.translate;
             posTransformed.emplace_back(tfPos);
-            posScreen.emplace_back((tfPos.xyz / hlslpp::float3(tfPos.w, -tfPos.w, tfPos.w)) * viewport.scale + viewport.translate);
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+            lodTraceTransformedVertex(state, i, uint32_t(globalIndex) + (i - dstIndex), rdramAddress,
+                inputX, inputY, inputZ, vertices[i], tfPos, screenPos, viewport, mvp,
+                curTransformIndex, curViewProjIndex,
+                modelMatrixSegmentedAddressStack[modelMatrixStackSize - 1],
+                modelMatrixPhysicalAddressStack[modelMatrixStackSize - 1]);
+#endif
+            posScreen.emplace_back(screenPos);
             floatIndex += 3;
         }
 
@@ -1293,6 +1395,21 @@ namespace RT64 {
         const bool forceBranch = state->ext.enhancementConfig->f3dex.forceBranch || extended.forceBranch;
         const int workloadCursor = state->ext.workloadQueue->writeCursor;
         const Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
+        if (vtxIndex >= RSP_MAX_VERTICES) {
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+            static uint32_t branchZInvalidVtxTraceCount = 0;
+            if (branchZInvalidVtxTraceCount < 64) {
+                const uint32_t targetAddress = fromSegmentedMasked(branchDl);
+                fprintf(stderr, "[RT64-GEOM][BRANCHZ_GUARD] #%u seg=0x%08X phys=0x%08X vtx=%u reason=vtx_oob\n",
+                    branchZInvalidVtxTraceCount + 1, branchDl, targetAddress, vtxIndex);
+            }
+            else if (branchZInvalidVtxTraceCount == 64) {
+                fprintf(stderr, "[RT64-GEOM][BRANCHZ_GUARD] trace limit reached; suppressing further invalid branchZ logs\n");
+            }
+            branchZInvalidVtxTraceCount++;
+#endif
+            return;
+        }
         const uint32_t globalIndex = indices[vtxIndex];
         const float screenZ = workload.drawData.posScreen[globalIndex][2] * DepthRange;
         const float zValueFloat = zValue / 65536.0f;
@@ -1327,6 +1444,21 @@ namespace RT64 {
         const bool forceBranch = state->ext.enhancementConfig->f3dex.forceBranch || extended.forceBranch;
         const int workloadCursor = state->ext.workloadQueue->writeCursor;
         const Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
+        if (vtxIndex >= RSP_MAX_VERTICES) {
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+            static uint32_t branchWInvalidVtxTraceCount = 0;
+            if (branchWInvalidVtxTraceCount < 64) {
+                const uint32_t targetAddress = fromSegmentedMasked(branchDl);
+                fprintf(stderr, "[RT64-GEOM][BRANCHW_GUARD] #%u seg=0x%08X phys=0x%08X vtx=%u reason=vtx_oob\n",
+                    branchWInvalidVtxTraceCount + 1, branchDl, targetAddress, vtxIndex);
+            }
+            else if (branchWInvalidVtxTraceCount == 64) {
+                fprintf(stderr, "[RT64-GEOM][BRANCHW_GUARD] trace limit reached; suppressing further invalid branchW logs\n");
+            }
+            branchWInvalidVtxTraceCount++;
+#endif
+            return;
+        }
         const uint32_t globalIndex = indices[vtxIndex];
         const float posW = workload.drawData.posTransformed[globalIndex][3];
         const bool taken = forceBranch || (posW < static_cast<float>(wValue));

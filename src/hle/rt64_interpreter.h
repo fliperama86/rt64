@@ -9,7 +9,16 @@
 #include "gbi/rt64_f3d.h"
 #include "gbi/rt64_gbi.h"
 
+#ifndef LOD_ENABLE_DL_PATH_TRACE
+#define LOD_ENABLE_DL_PATH_TRACE 0
+#endif
+
 namespace RT64 {
+#if LOD_ENABLE_DL_PATH_TRACE
+    void lodTraceDlPathRecord(State *state, const GBI *gbi, DisplayList *dl, uint32_t cmdCount);
+    void lodTraceDlPathDump(State *state, const GBI *gbi, const char *reason, uint32_t dlStartAddress, DisplayList *dlStart, DisplayList *dl, uint32_t cmdCount, uint32_t aux0, uint32_t aux1);
+#endif
+
     struct Interpreter {
         State *state;
         GBIManager gbiManager;

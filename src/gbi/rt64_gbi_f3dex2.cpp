@@ -5,6 +5,7 @@
 #include "rt64_gbi_f3dex2.h"
 
 #include <cassert>
+#include <cstdio>
 
 #include "../include/rt64_extended_gbi.h"
 #include "hle/rt64_interpreter.h"
@@ -12,6 +13,14 @@
 #include "rt64_gbi_extended.h"
 #include "rt64_gbi_f3d.h"
 #include "rt64_gbi_f3dex.h"
+
+#ifndef LOD_FIX_INVALID_F3DEX2_VERTEX_ABORT
+#define LOD_FIX_INVALID_F3DEX2_VERTEX_ABORT 0
+#endif
+
+#ifndef LOD_FIX_MALFORMED_DL_CLEAR_STACK
+#define LOD_FIX_MALFORMED_DL_CLEAR_STACK 0
+#endif
 
 namespace RT64 {
     namespace GBI_F3DEX2 {
@@ -136,11 +145,38 @@ namespace RT64 {
         }
 
         void vertex(State *state, DisplayList **dl) {
-            uint8_t vtxCount = (*dl)->p0(12, 8);
+            const uint32_t vtxCount = (*dl)->p0(12, 8);
+            const uint32_t rawDstEnd = (*dl)->p0(1, 7);
+            const uint32_t dstIndex = rawDstEnd - vtxCount;
 #if LOD_ENABLE_RENDER_GEOM_TRACE
-            GBI_F3D::lodTraceVertexCommand(state, *dl, "F3DEX2", (*dl)->w1, vtxCount, (*dl)->p0(1, 7) - vtxCount);
+            GBI_F3D::lodTraceVertexCommand(state, *dl, "F3DEX2", (*dl)->w1, vtxCount, dstIndex);
 #endif
-            state->rsp->setVertex((*dl)->w1, vtxCount, (*dl)->p0(1, 7) - vtxCount);
+#if LOD_FIX_INVALID_F3DEX2_VERTEX_ABORT
+            if ((vtxCount == 0) || (rawDstEnd < vtxCount) ||
+                (dstIndex >= RSP_MAX_VERTICES) || ((dstIndex + vtxCount) > RSP_MAX_VERTICES)) {
+#if LOD_ENABLE_DL_PATH_TRACE
+                if (state->ext.interpreter != nullptr) {
+                    lodTraceDlPathDump(state, state->ext.interpreter->hleGBI, "invalid-f3dex2-vtx",
+                        state->displayListAddress, nullptr, *dl, 0, vtxCount, rawDstEnd);
+                }
+#endif
+#if LOD_ENABLE_RENDER_GEOM_TRACE
+                static uint32_t invalidVtxCount = 0;
+                invalidVtxCount++;
+                if ((invalidVtxCount <= 32) || ((invalidVtxCount % 100) == 0)) {
+                    fprintf(stderr,
+                        "[RT64-GEOM][VTX_GUARD] #%u decoder=F3DEX2 caller_w0=0x%08X caller_w1=0x%08X count=%u raw_dst_end=%u dst=%u\n",
+                        invalidVtxCount, (*dl)->w0, (*dl)->w1, vtxCount, rawDstEnd, dstIndex);
+                }
+#endif
+#if LOD_FIX_MALFORMED_DL_CLEAR_STACK
+                state->returnAddressStack.clear();
+#endif
+                *dl = nullptr;
+                return;
+            }
+#endif
+            state->rsp->setVertex((*dl)->w1, vtxCount, dstIndex);
         }
 
         void tri1(State *state, DisplayList **dl) {

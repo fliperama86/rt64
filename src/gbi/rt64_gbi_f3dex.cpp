@@ -68,17 +68,32 @@ namespace RT64 {
 #if LOD_FIX_INVALID_GBI_LOAD_UCODE
             const uint32_t textAddress = (*dl)->w1;
             const uint32_t dataAddress = state->microcode.half1;
+            constexpr uint32_t AddressMask = 0xFFFFF8U;
+            const uint32_t maskedTextAddress = textAddress & AddressMask;
+            const uint32_t maskedDataAddress = dataAddress & AddressMask;
+            const bool missingDataPointer = dataAddress == 0;
+            const bool textAddressOob = maskedTextAddress > RDRAMSize;
+            const bool dataAddressOob = maskedDataAddress > RDRAMSize;
 
             // A valid F3DEX/F3DEX2/S2DEX LOAD_UCODE sequence carries the ucode data pointer
             // in a preceding RDPHALF_1. If it is missing, preserving the current GBI is safer
             // than clobbering the interpreter to a null/unknown GBI and dropping the rest of
             // the display list.
-            if (dataAddress == 0) {
+            //
+            // The ucode text/data pointers must also point into RDRAM. If garbage display-list
+            // data is misread as LOAD_UCODE, the high bits may mask into an invalid RDRAM
+            // location. Do not ask the GBI database to hash those bytes, and do not preserve the
+            // current GBI to keep interpreting malformed commands.
+            if (missingDataPointer || textAddressOob || dataAddressOob) {
 #if LOD_ENABLE_GBI_MISS_TRACE
                 static uint32_t skippedInvalidLoadUCodeCount = 0;
                 skippedInvalidLoadUCodeCount++;
                 if ((skippedInvalidLoadUCodeCount <= 16) || ((skippedInvalidLoadUCodeCount % 100) == 0)) {
                     const GBI *currentGBI = state->ext.interpreter->hleGBI;
+                    const char *reason =
+                        missingDataPointer ? "missing_data" :
+                        textAddressOob ? "text_oob" :
+                        "data_oob";
                     uint32_t commandAddress = 0xFFFFFFFFU;
                     const uintptr_t dlHost = reinterpret_cast<uintptr_t>(*dl);
                     const uintptr_t rdramHost = reinterpret_cast<uintptr_t>(state->RDRAM);
@@ -87,17 +102,20 @@ namespace RT64 {
                     }
                     fprintf(stderr,
 #if LOD_FIX_INVALID_GBI_LOAD_UCODE_END_DL
-                        "[GBI_LOAD_UCODE_ENDDL] #%u dl=%llu start=0x%08X cmd=0x%08X w0=0x%08X text=0x%08X data=0x%08X current_ucode=%u\n",
+                        "[GBI_LOAD_UCODE_ENDDL] #%u reason=%s dl=%llu start=0x%08X cmd=0x%08X w0=0x%08X text=0x%08X data=0x%08X masked_text=0x%08X masked_data=0x%08X current_ucode=%u\n",
 #else
-                        "[GBI_LOAD_UCODE_SKIP] #%u dl=%llu start=0x%08X cmd=0x%08X w0=0x%08X text=0x%08X data=0x%08X current_ucode=%u\n",
+                        "[GBI_LOAD_UCODE_SKIP] #%u reason=%s dl=%llu start=0x%08X cmd=0x%08X w0=0x%08X text=0x%08X data=0x%08X masked_text=0x%08X masked_data=0x%08X current_ucode=%u\n",
 #endif
                         skippedInvalidLoadUCodeCount,
+                        reason,
                         static_cast<unsigned long long>(state->displayListCounter),
                         state->displayListAddress,
                         commandAddress,
                         (*dl)->w0,
                         textAddress,
                         dataAddress,
+                        maskedTextAddress,
+                        maskedDataAddress,
                         currentGBI != nullptr ? static_cast<unsigned>(currentGBI->ucode) : 0);
                 }
 #endif
