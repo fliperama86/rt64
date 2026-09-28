@@ -8,6 +8,18 @@
 #include <cmath>
 #include <memory>
 
+#ifndef LOD_FIX_RT64_VIEWPROJ_DECOMPOSE
+#define LOD_FIX_RT64_VIEWPROJ_DECOMPOSE 0
+#endif
+
+#ifndef LOD_ENABLE_RT64_VIEWPROJ_TRACE
+#define LOD_ENABLE_RT64_VIEWPROJ_TRACE 0
+#endif
+
+#if LOD_ENABLE_RT64_VIEWPROJ_TRACE
+#include <cstdio>
+#endif
+
 namespace RT64 {
     float sqr(float x) {
         return x * x;
@@ -52,7 +64,38 @@ namespace RT64 {
         v[2][2] = -vp[2][3];
         v[3][2] = -vp[3][3];
 
+#if LOD_FIX_RT64_VIEWPROJ_DECOMPOSE || LOD_ENABLE_RT64_VIEWPROJ_TRACE
+        // LoD loads lookAt x perspective as a single projection matrix. Solving the
+        // depth scale from row 0 alone divides by the x component of the camera's
+        // forward axis, which is near zero when the camera faces along world Z; the
+        // 16.16 fixed-point noise then moves the near/far planes whenever this split
+        // is used (widescreen aspect adjustment, frame interpolation). The forward
+        // axis as a whole is never short, so solve over all three rows instead.
+        const float zAxisLengthSq = sqr(v[0][2]) + sqr(v[1][2]) + sqr(v[2][2]);
+        const float robustDepthScale = (vp[0][2] * v[0][2] + vp[1][2] * v[1][2] + vp[2][2] * v[2][2]) / zAxisLengthSq;
+#endif
+#if LOD_ENABLE_RT64_VIEWPROJ_TRACE
+        {
+            const float legacyDepthScale = vp[0][2] / v[0][2];
+            static uint32_t traceCount = 0;
+            const float relDiff = std::fabs(legacyDepthScale - robustDepthScale) / std::fmax(std::fabs(robustDepthScale), 1e-6f);
+            // An exact zero makes the legacy path NaN and fall back to an exact
+            // v = identity, p = vp split, so only finite mismatches matter.
+            if (std::isfinite(legacyDepthScale) && (relDiff >= 1e-3f)) {
+                traceCount++;
+                if ((traceCount <= 40) || ((traceCount % 600) == 0)) {
+                    fprintf(stderr, "[RT64-VIEWPROJ] #%u forward=(%.5f,%.5f,%.5f) depthScale legacy=%g robust=%g relDiff=%g fix=%d\n",
+                        traceCount, float(v[0][2]), float(v[1][2]), float(v[2][2]), legacyDepthScale, robustDepthScale, relDiff,
+                        LOD_FIX_RT64_VIEWPROJ_DECOMPOSE);
+                }
+            }
+        }
+#endif
+#if LOD_FIX_RT64_VIEWPROJ_DECOMPOSE
+        p[2][2] = robustDepthScale;
+#else
         p[2][2] = vp[0][2] / v[0][2];
+#endif
         p[3][2] = vp[3][2] - p[2][2] * v[3][2];
 
         p[0][0] = sqrtf(sqr(vp[0][0]) + sqr(vp[1][0]) + sqr(vp[2][0]));
