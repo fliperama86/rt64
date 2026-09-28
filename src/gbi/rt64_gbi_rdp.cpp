@@ -4,11 +4,21 @@
 
 #include "rt64_gbi_rdp.h"
 
+#include <cstdio>
+
 #include "../include/rt64_extended_gbi.h"
 
 #include "rt64_f3d.h"
 
+#ifndef LOD_ENABLE_ISSUE27_FORCE_GLOW_ALPHA
+#define LOD_ENABLE_ISSUE27_FORCE_GLOW_ALPHA 0
+#endif
+
 namespace RT64 {
+    namespace GBI_F3D {
+        bool lodIssue27PortalForceGlowAlphaActive();
+    }
+
     namespace GBI_RDP {
         void noOp(State *state, DisplayList **dl) {
             // Do nothing.
@@ -101,7 +111,19 @@ namespace RT64 {
             // While the manual states that lodMin has 8 bits of precision, the RDP only uses 5 of them.
             const uint8_t lodFrac = (*dl)->p0(0, 8);
             const uint8_t lodMin = (*dl)->p0(8, 5); 
-            const uint32_t color = (*dl)->w1;
+            uint32_t color = (*dl)->w1;
+#if LOD_ENABLE_ISSUE27_FORCE_GLOW_ALPHA
+            if (GBI_F3D::lodIssue27PortalForceGlowAlphaActive() && ((color & 0xFFU) == 0U)) {
+                static uint32_t proofLogCount = 0;
+                proofLogCount++;
+                if ((proofLogCount <= 16U) || ((proofLogCount % 300U) == 0U)) {
+                    fprintf(stderr,
+                            "[ISSUE27_GLOW_ALPHA_PROOF] #%u setPrimColor 0x%08X -> 0x%08X\n",
+                            proofLogCount, color, color | 0xFFU);
+                }
+                color |= 0xFFU;
+            }
+#endif
             state->rdp->setPrimColor(lodFrac, lodMin, color);
         }
 
